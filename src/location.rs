@@ -3,6 +3,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::time::timeout;
+#[cfg(windows)]
+use windows::Devices::Geolocation::GeolocationAccessStatus;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LocationSnapshot {
@@ -46,13 +48,13 @@ async fn get_location_inner() -> LocationSnapshot {
 
 #[cfg(windows)]
 async fn windows_location() -> crate::error::AppResult<LocationSnapshot> {
-    use windows::Devices::Geolocation::{GeolocationAccessStatus, Geolocator};
-
+    use windows::Devices::Geolocation::Geolocator;
     let request = Geolocator::RequestAccessAsync()?;
     let access_status = request.get()?;
+    let access_status_label = access_status_label(access_status);
     if access_status != GeolocationAccessStatus::Allowed {
         return Ok(LocationSnapshot {
-            access_status: format!("{access_status:?}"),
+            access_status: access_status_label.to_owned(),
             latitude: None,
             longitude: None,
             accuracy_meters: None,
@@ -67,15 +69,24 @@ async fn windows_location() -> crate::error::AppResult<LocationSnapshot> {
     let point = coordinate.Point()?;
     let basic = point.Position()?;
     let timestamp = coordinate.Timestamp()?;
-
     Ok(LocationSnapshot {
-        access_status: format!("{access_status:?}"),
+        access_status: access_status_label.to_owned(),
         latitude: Some(basic.Latitude),
         longitude: Some(basic.Longitude),
         accuracy_meters: Some(coordinate.Accuracy()?),
         timestamp_utc: windows_ticks_to_rfc3339(timestamp.UniversalTime),
         error: None,
     })
+}
+
+#[cfg(windows)]
+fn access_status_label(status: GeolocationAccessStatus) -> &'static str {
+    match status {
+        GeolocationAccessStatus::Unspecified => "Unspecified",
+        GeolocationAccessStatus::Allowed => "Allowed",
+        GeolocationAccessStatus::Denied => "Denied",
+        _ => "Unknown",
+    }
 }
 
 #[cfg(not(windows))]
@@ -119,6 +130,24 @@ mod tests {
         assert_eq!(
             windows_ticks_to_rfc3339(116_444_736_012_345_678),
             Some("1970-01-01T00:00:01.2345678Z".to_owned())
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn access_status_label_should_humanize_variants() {
+        use windows::Devices::Geolocation::GeolocationAccessStatus;
+        assert_eq!(
+            access_status_label(GeolocationAccessStatus::Allowed),
+            "Allowed"
+        );
+        assert_eq!(
+            access_status_label(GeolocationAccessStatus::Denied),
+            "Denied"
+        );
+        assert_eq!(
+            access_status_label(GeolocationAccessStatus::Unspecified),
+            "Unspecified"
         );
     }
 }

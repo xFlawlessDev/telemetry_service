@@ -81,7 +81,7 @@ Payload shape:
     "model": "ADLP"
   },
   "location": {
-    "access_status": "GeolocationAccessStatus(1)",
+    "access_status": "Allowed",
     "latitude": -6.2328915,
     "longitude": 106.895924,
     "accuracy_meters": 323.0,
