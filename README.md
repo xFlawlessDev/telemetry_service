@@ -85,7 +85,7 @@ Payload shape:
     "latitude": -6.2328915,
     "longitude": 106.895924,
     "accuracy_meters": 323.0,
-    "timestamp_utc": "134258745650932211",
+    "timestamp_utc": "2026-06-14T01:36:05.0932211Z",
     "error": null
   },
   "attempt": {
