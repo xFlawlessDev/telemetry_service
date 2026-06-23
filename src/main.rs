@@ -4,11 +4,8 @@ mod api;
 mod autostart;
 mod config;
 mod error;
-mod hardware;
-mod location;
 mod logging;
 mod paths;
-mod payload;
 mod retry;
 mod state;
 
@@ -19,9 +16,7 @@ use tokio::{fs, time::sleep};
 use api::{ActivationClient, ActivationFailure};
 use config::AppConfig;
 use error::{AppError, AppResult};
-use hardware::collect_hardware_identity;
 use paths::AppPaths;
-use payload::build_activation_payload;
 use state::{load_or_initialize_state, now_utc, save_state_atomic};
 use tracing::{error, info, warn};
 
@@ -136,33 +131,11 @@ async fn run(config: AppConfig, paths: AppPaths, options: RuntimeOptions) -> App
         state.record_attempt(now_utc());
         save_state_atomic(&paths.state_file, &state).await?;
 
-        let hardware = match collect_hardware_identity() {
-            Ok(identity) => {
-                info!(
-                    has_identifier = identity.has_identifier(),
-                    "hardware collection completed"
-                );
-                identity
-            }
-            Err(error) => {
-                warn!(%error, "hardware collection failed");
-                return Err(error);
-            }
-        };
-
-        let location = location::get_location(config.geolocation_timeout).await;
-        info!(access_status = %location.access_status, has_coordinates = location.latitude.is_some() && location.longitude.is_some(), "location collection completed");
-
-        let payload = build_activation_payload(&state, config.agent_version, &hardware, &location);
-        if options.print_payload {
-            println!("{}", serde_json::to_string_pretty(&payload)?);
-        }
-
-        match client.activate(state.install_id, &payload).await {
+        match client.activate(state.install_id).await {
             Ok(success) => {
-                state.mark_activated(success.activation_id);
+                state.mark_activated(success.device_id);
                 save_state_atomic(&paths.state_file, &state).await?;
-                info!(activation_id = ?state.activation_id, "activation succeeded");
+                info!(device_id = ?state.activation_id, "registration succeeded");
                 cleanup_autostart(&config).await?;
                 return Ok(());
             }
@@ -177,7 +150,7 @@ async fn run(config: AppConfig, paths: AppPaths, options: RuntimeOptions) -> App
             }) => {
                 state.last_error = Some(reason.clone());
                 save_state_atomic(&paths.state_file, &state).await?;
-                warn!(%reason, "activation retryable failure");
+                warn!(%reason, "registration retryable failure");
                 if options.once || !config.retry_forever {
                     return Ok(());
                 }

@@ -3,6 +3,7 @@ use std::{env, fs, path::Path};
 const KEYS: &[&str] = &[
     "TELEMETRY_BASE_URL",
     "TELEMETRY_API_KEY",
+    "TELEMETRY_USER_ID",
     "TELEMETRY_TASK_NAME",
 ];
 

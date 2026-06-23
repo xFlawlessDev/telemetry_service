@@ -6,9 +6,9 @@ Windows activation background agent written in Rust.
 
 - Starts under a Windows Scheduled Task at boot or login.
 - Loads or creates local activation state.
-- Collects hardware identity with WMI.
-- Collects optional Windows geolocation.
-- Posts activation payload to `{base_url}/device-activations`.
+- Collects hardware serial number.
+- Collects optional Windows geolocation coordinates.
+- Posts activation payload to `https://register.axiooworld.com/beta/axioo_on/create`.
 - Retries retryable network/server failures with exponential backoff and jitter.
 - Marks local state as activated after server success.
 - Deletes the activation Scheduled Task after success.
@@ -24,10 +24,10 @@ Startup flow:
 3. Load `activation_state.json`; create it when missing.
 4. If `activated = true`, delete the Scheduled Task and exit.
 5. Increment `attempt_count`, set `last_attempt_utc`, and save state.
-6. Collect WMI hardware identity.
+6. Collect hardware serial number.
 7. Collect optional Windows geolocation with timeout.
 8. Build activation payload.
-9. `POST` payload to `{base_url}/device-activations`.
+9. `POST` payload to `https://register.axiooworld.com/beta/axioo_on/create`.
 10. On success, store `activation_id`, set `activated = true`, save state, delete Scheduled Task, and exit.
 11. On retryable failure, store `last_error`, save state, sleep with backoff, then retry.
 12. On fatal failure, store `last_error`, save state, and exit with error.
@@ -54,51 +54,33 @@ Backoff starts at 15 seconds, caps at 15 minutes, and applies ±20% jitter. Defa
 Endpoint:
 
 ```text
-POST {base_url}/device-activations
+POST https://register.axiooworld.com/beta/axioo_on/create
 ```
 
 Headers:
 
 ```text
-Authorization: Bearer {api_key}
+Authorization: Bearer {token}
 Content-Type: application/json
 Idempotency-Key: {install_id}
 ```
 
-`Idempotency-Key` uses the stable local `install_id`, so duplicate attempts are safe when the server implements idempotency.
+`Idempotency-Key` uses the stable local `install_id`, so duplicate create attempts are safe when the server implements idempotency.
 
 Payload shape:
 
 ```json
 {
-  "install_id": "68206efe-35f5-4907-9bd1-0bb12c640971",
-  "agent_version": "0.1.0",
-  "hardware": {
-    "bios_serial": "ABC123",
-    "system_uuid": "03000200-0400-0500-0006-000700080009",
-    "baseboard_serial": "ABC123",
-    "manufacturer": "MSI",
-    "model": "ADLP"
-  },
-  "location": {
-    "access_status": "Allowed",
-    "latitude": -6.2328915,
-    "longitude": 106.895924,
-    "accuracy_meters": 323.0,
-    "timestamp_utc": "2026-06-14T01:36:05.0932211Z",
-    "error": null
-  },
-  "attempt": {
-    "count": 1,
-    "first_seen_utc": "2026-06-14T01:36:04.5319993Z",
-    "last_attempt_utc": "2026-06-14T01:36:04.5390905Z"
-  }
+  "serial_number": "0223290070363009024",
+  "latitude": -6.914744,
+  "longitude": 107.60981,
+  "accuracy_meters": 10.0
 }
 ```
 
-Hardware fields are optional. Invalid placeholder identifiers are normalized to `null`, including empty strings, `To be filled by O.E.M.`, `Default string`, `System Serial Number`, and all-zero UUIDs.
+Only `serial_number`, `latitude`, `longitude`, and `accuracy_meters` are posted to the create endpoint.
 
-Location fields are optional. Permission denial, unavailable service, timeout, or Windows API failure does not block activation; coordinates become `null` and `error` records the failure reason.
+Coordinate fields are nullable. If the hardware or Windows geolocation API does not support coordinates, the request is still sent with `latitude`, `longitude`, and `accuracy_meters` set to `null`.
 
 Success response:
 
@@ -142,7 +124,7 @@ Default log path:
 %ProgramData%\TelemetryService\logs\activation.log
 ```
 
-Logs include startup, state status, hardware/geolocation summaries, HTTP status, retry delays, activation success, and autostart cleanup result. Logs avoid API keys and raw auth headers.
+Logs include startup, state status, HTTP status, retry delays, activation success, and autostart cleanup result. Logs avoid API keys and raw auth headers.
 
 ## Configuration
 
@@ -162,7 +144,6 @@ Other runtime defaults live in `src/config.rs`:
 
 - `agent_version`
 - request timeout
-- geolocation timeout
 - retry backoff and jitter
 
 `TELEMETRY_API_KEY` is compiled into the executable. It is not a real secret once shipped. Server-side rate limiting, idempotency, replay protection, and validation are still required.
