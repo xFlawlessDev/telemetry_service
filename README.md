@@ -28,7 +28,7 @@ Startup flow:
 7. Collect optional Windows geolocation with timeout.
 8. Build activation payload.
 9. `POST` payload to `https://register.axiooworld.com/axioo_on/create`.
-10. On API success (`result = "0"`), store local state, delete Scheduled Task, and exit.
+10. On API success (`result = 0`), store local state, delete Scheduled Task, and exit.
 11. On retryable failure, keep local state unsaved, sleep with backoff, then retry.
 12. On fatal failure, keep local state unsaved and exit with error.
 
@@ -45,6 +45,7 @@ Fatal failures:
 - HTTP `400`
 - HTTP `401`
 - HTTP `403`
+- API business reject (`result = -1`), e.g. invalid/expired token, empty serial number, database save failure
 - unexpected non-retryable client errors
 
 Backoff starts at 15 seconds, caps at 15 minutes, and applies ±20% jitter. Default mode retries forever because startup activation must survive offline boot. `--once` changes retryable failure behavior to exit after one attempt without writing local state.
@@ -84,12 +85,12 @@ Success response:
 
 ```json
 {
-  "result": "0",
-  "message": "activated"
+  "result": 0,
+  "message": "Save succeed"
 }
 ```
 
-Only HTTP `200 OK` with JSON `result = "0"` marks local state activated. Other `200 OK` responses are treated as failed activation and use `message` as the server reason.
+Only HTTP `200 OK` with JSON `result = 0` marks local state activated. Other `200 OK` responses are treated as failed activation and use `message` as the server reason.
 ## Local State
 
 Default state path:
@@ -134,6 +135,7 @@ Supported keys:
 
 ```text
 TELEMETRY_BASE_URL=https://activation.example.com
+TELEMETRY_USER_ID=replace-with-build-time-user-id
 TELEMETRY_API_KEY=replace-with-real-key
 TELEMETRY_TASK_NAME=TelemetryServiceActivation
 ```

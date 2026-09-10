@@ -48,6 +48,7 @@ Contoh `.env`:
 
 ```text
 TELEMETRY_BASE_URL=https://activation.example.com
+TELEMETRY_USER_ID=replace-with-build-time-user-id
 TELEMETRY_API_KEY=replace-with-real-key
 TELEMETRY_TASK_NAME=TelemetryServiceActivation
 ```
@@ -148,7 +149,7 @@ Saat user pertama login, Scheduled Task menjalankan agent. Agent akan:
 2. collect hardware dan lokasi;
 3. kirim aktivasi;
 4. retry jika offline/server belum tersedia tanpa menulis local state;
-5. buat `activation_state.json` hanya setelah API sukses (`result = "0"`);
+5. buat `activation_state.json` hanya setelah API sukses (`result = 0`);
 6. delete Scheduled Task;
 7. exit.
 
