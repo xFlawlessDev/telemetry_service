@@ -17,7 +17,7 @@ use api::{ActivationClient, ActivationFailure};
 use config::AppConfig;
 use error::{AppError, AppResult};
 use paths::AppPaths;
-use state::{load_or_initialize_state, now_utc, save_state_atomic};
+use state::{load_existing_or_new_state, now_utc, save_state_atomic};
 use tracing::{error, info, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,7 +117,7 @@ async fn remove_dir_if_exists(path: &std::path::Path) -> AppResult<()> {
 
 async fn run(config: AppConfig, paths: AppPaths, options: RuntimeOptions) -> AppResult<()> {
     info!(state = %paths.state_file.display(), log = %paths.log_file.display(), data_dir = %paths.data_dir.display(), "activation agent startup");
-    let mut state = load_or_initialize_state(&paths.state_file).await?;
+    let mut state = load_existing_or_new_state(&paths.state_file).await?;
     info!(install_id = %state.install_id, activated = state.activated, attempts = state.attempt_count, "state loaded");
 
     if state.activated {
@@ -129,27 +129,22 @@ async fn run(config: AppConfig, paths: AppPaths, options: RuntimeOptions) -> App
 
     loop {
         state.record_attempt(now_utc());
-        save_state_atomic(&paths.state_file, &state).await?;
 
         match client.activate(state.install_id).await {
-            Ok(success) => {
-                state.mark_activated(success.device_id);
+            Ok(_) => {
+                state.mark_activated(state.install_id.to_string());
                 save_state_atomic(&paths.state_file, &state).await?;
-                info!(device_id = ?state.activation_id, "registration succeeded");
+                info!(activation_id = ?state.activation_id, "registration succeeded");
                 cleanup_autostart(&config).await?;
                 return Ok(());
             }
             Err(ActivationFailure::Fatal(reason)) => {
-                state.last_error = Some(reason.clone());
-                save_state_atomic(&paths.state_file, &state).await?;
                 return Err(AppError::FatalActivation(reason));
             }
             Err(ActivationFailure::Retryable {
                 reason,
                 retry_after,
             }) => {
-                state.last_error = Some(reason.clone());
-                save_state_atomic(&paths.state_file, &state).await?;
                 warn!(%reason, "registration retryable failure");
                 if options.once || !config.retry_forever {
                     return Ok(());

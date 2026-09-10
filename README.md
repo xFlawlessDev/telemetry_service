@@ -5,10 +5,10 @@ Windows activation background agent written in Rust.
 ## Behavior
 
 - Starts under a Windows Scheduled Task at boot or login.
-- Loads or creates local activation state.
+- Loads existing local activation state, or keeps new state in memory until server success.
 - Collects hardware serial number.
 - Collects optional Windows geolocation coordinates.
-- Posts activation payload to `https://register.axiooworld.com/beta/axioo_on/create`.
+- Posts activation payload to `https://register.axiooworld.com/axioo_on/create`.
 - Retries retryable network/server failures with exponential backoff and jitter.
 - Marks local state as activated after server success.
 - Deletes the activation Scheduled Task after success.
@@ -21,16 +21,16 @@ Startup flow:
 
 1. Discover data, state, and log paths.
 2. Initialize file logging.
-3. Load `activation_state.json`; create it when missing.
+3. Load `activation_state.json` if it already exists; otherwise keep fresh state in memory only.
 4. If `activated = true`, delete the Scheduled Task and exit.
-5. Increment `attempt_count`, set `last_attempt_utc`, and save state.
+5. Increment in-memory `attempt_count` and set `last_attempt_utc`.
 6. Collect hardware serial number.
 7. Collect optional Windows geolocation with timeout.
 8. Build activation payload.
-9. `POST` payload to `https://register.axiooworld.com/beta/axioo_on/create`.
-10. On success, store `activation_id`, set `activated = true`, save state, delete Scheduled Task, and exit.
-11. On retryable failure, store `last_error`, save state, sleep with backoff, then retry.
-12. On fatal failure, store `last_error`, save state, and exit with error.
+9. `POST` payload to `https://register.axiooworld.com/axioo_on/create`.
+10. On API success (`result = "0"`), store local state, delete Scheduled Task, and exit.
+11. On retryable failure, keep local state unsaved, sleep with backoff, then retry.
+12. On fatal failure, keep local state unsaved and exit with error.
 
 Retryable failures:
 
@@ -47,51 +47,49 @@ Fatal failures:
 - HTTP `403`
 - unexpected non-retryable client errors
 
-Backoff starts at 15 seconds, caps at 15 minutes, and applies ±20% jitter. Default mode retries forever because startup activation must survive offline boot. `--once` changes retryable failure behavior to save state and exit after one attempt.
+Backoff starts at 15 seconds, caps at 15 minutes, and applies ±20% jitter. Default mode retries forever because startup activation must survive offline boot. `--once` changes retryable failure behavior to exit after one attempt without writing local state.
 
 ## Activation Request
 
 Endpoint:
 
 ```text
-POST https://register.axiooworld.com/beta/axioo_on/create
+POST https://register.axiooworld.com/axioo_on/create
 ```
 
 Headers:
 
 ```text
 Authorization: Bearer {token}
-Content-Type: application/json
+Content-Type: multipart/form-data
 Idempotency-Key: {install_id}
 ```
 
-`Idempotency-Key` uses the stable local `install_id`, so duplicate create attempts are safe when the server implements idempotency.
+`Idempotency-Key` uses the in-memory or persisted `install_id`, so duplicate create attempts are safe when the server implements idempotency. If no state file exists yet, the id becomes durable only after successful activation.
 
-Payload shape:
+Payload fields:
 
-```json
-{
-  "serial_number": "0223290070363009024",
-  "latitude": -6.914744,
-  "longitude": 107.60981,
-  "accuracy_meters": 10.0
-}
+```text
+serial_number=0223290070363009024
+latitude=-6.914744
+longitude=107.60981
+accuracy_meters=10
 ```
 
-Only `serial_number`, `latitude`, `longitude`, and `accuracy_meters` are posted to the create endpoint.
+Only `serial_number`, `latitude`, `longitude`, and `accuracy_meters` are posted to the create endpoint. All payload fields are sent as form-data text fields.
 
-Coordinate fields are nullable. If the hardware or Windows geolocation API does not support coordinates, the request is still sent with `latitude`, `longitude`, and `accuracy_meters` set to `null`.
+Coordinate fields are nullable as text. If the hardware or Windows geolocation API does not support coordinates, the request is still sent with `latitude`, `longitude`, and `accuracy_meters` set to text value `null`.
 
 Success response:
 
 ```json
 {
-  "status": "activated",
-  "activation_id": "server-generated-id"
+  "result": "0",
+  "message": "activated"
 }
 ```
 
-Only `status = "activated"` with a non-empty `activation_id` marks local state activated.
+Only HTTP `200 OK` with JSON `result = "0"` marks local state activated. Other `200 OK` responses are treated as failed activation and use `message` as the server reason.
 ## Local State
 
 Default state path:
@@ -108,13 +106,15 @@ Fallback path when `%ProgramData%` is unavailable:
 
 If both are unavailable, the agent uses `./TelemetryService/activation_state.json`.
 
+The state file is created only after the create endpoint returns success. Blocked domains, offline manufacturing networks, retryable failures, and fatal server responses do not create or update local activation state.
+
 Corrupt state files are renamed to:
 
 ```text
 activation_state.json.corrupt.<timestamp>
 ```
 
-A fresh state file is then created.
+A fresh state file is then created only after the next successful activation.
 
 ## Logs
 
@@ -154,7 +154,7 @@ Other runtime defaults live in `src/config.rs`:
 --once
 ```
 
-Run one activation attempt, save attempt metadata, then exit on retryable failure.
+Run one activation attempt, then exit on retryable failure without writing local state.
 
 ```text
 --print-payload
@@ -182,7 +182,7 @@ Delete local activation state and logs. Use this before sealing or cloning a Win
 
 ## Manufacturing Deploy
 
-Safe image rule: copy the binary into the image, but do not keep local state from the master image.
+Safe image rule: copy the binary into the image, but do not keep local state from the master image. Manufacturing networks should block `register.axiooworld.com` during production so activation cannot post before the device reaches the intended activation network.
 
 For Audit/OOBE or post-clone setup:
 
@@ -199,7 +199,7 @@ For QC cleanup after a manual test run:
 & "C:\Program Files\TelemetryService\telemetry_service.exe" --install-task
 ```
 
-Do not run activation on the master image unless state is reset afterward. Otherwise every clone can inherit the same `install_id`.
+Do not allow successful activation on the master image. Otherwise every clone can inherit activated local state.
 
 
 Auto deploy script:

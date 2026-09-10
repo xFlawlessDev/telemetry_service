@@ -44,16 +44,14 @@ impl ActivationState {
     }
 }
 
-pub async fn load_or_initialize_state(path: &Path) -> AppResult<ActivationState> {
+pub async fn load_existing_or_new_state(path: &Path) -> AppResult<ActivationState> {
     let result = match fs::read(path).await {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|source| AppError::StateJson {
             path: path.to_path_buf(),
             source,
         }),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let state = ActivationState::new(now_utc());
-            save_state_atomic(path, &state).await?;
-            Ok(state)
+            Ok(ActivationState::new(now_utc()))
         }
         Err(source) => Err(io_error(path, source)),
     };
@@ -62,9 +60,7 @@ pub async fn load_or_initialize_state(path: &Path) -> AppResult<ActivationState>
         Ok(state) => Ok(state),
         Err(AppError::StateJson { .. }) => {
             quarantine_corrupt_state(path).await?;
-            let state = ActivationState::new(now_utc());
-            save_state_atomic(path, &state).await?;
-            Ok(state)
+            Ok(ActivationState::new(now_utc()))
         }
         Err(error) => Err(error),
     }
@@ -124,36 +120,38 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn load_or_initialize_state_should_create_new_state_when_missing() {
+    async fn load_existing_or_new_state_should_not_create_file_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("activation_state.json");
 
-        let state = load_or_initialize_state(&path).await.unwrap();
+        let state = load_existing_or_new_state(&path).await.unwrap();
 
         assert!(!state.activated);
-        assert!(path.exists());
+        assert!(!path.exists());
     }
 
     #[tokio::test]
-    async fn load_or_initialize_state_should_preserve_install_id_when_existing() {
+    async fn load_existing_or_new_state_should_preserve_install_id_when_existing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("activation_state.json");
-        let first = load_or_initialize_state(&path).await.unwrap();
+        let first = ActivationState::new(now_utc());
+        save_state_atomic(&path, &first).await.unwrap();
 
-        let second = load_or_initialize_state(&path).await.unwrap();
+        let second = load_existing_or_new_state(&path).await.unwrap();
 
         assert_eq!(first.install_id, second.install_id);
     }
 
     #[tokio::test]
-    async fn load_or_initialize_state_should_quarantine_corrupt_json() {
+    async fn load_existing_or_new_state_should_quarantine_corrupt_json_without_creating_state() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("activation_state.json");
         tokio::fs::write(&path, b"not json").await.unwrap();
 
-        let state = load_or_initialize_state(&path).await.unwrap();
+        let state = load_existing_or_new_state(&path).await.unwrap();
 
         assert!(!state.activated);
+        assert!(!path.exists());
         assert!(dir.path().read_dir().unwrap().any(|entry| {
             entry
                 .unwrap()

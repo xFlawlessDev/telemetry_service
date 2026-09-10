@@ -18,6 +18,8 @@ State yang wajib kosong sebelum image disegel atau dikloning:
 
 Jika `activation_state.json` ikut ke image master, semua mesin clone bisa memakai `install_id` yang sama. Server akan melihat beberapa device sebagai instalasi yang sama.
 
+Selama proses manufaktur/produksi, blokir domain `register.axiooworld.com` di network produksi agar unit tidak bisa melakukan post aktivasi sebelum sampai ke network aktivasi yang benar.
+
 File yang boleh ikut image:
 
 ```text
@@ -142,11 +144,11 @@ Setelah clone masuk mesin final, jalankan first-boot/post-clone script:
 
 Saat user pertama login, Scheduled Task menjalankan agent. Agent akan:
 
-1. membuat `activation_state.json` baru;
+1. membuat state baru di memory;
 2. collect hardware dan lokasi;
 3. kirim aktivasi;
-4. retry jika offline/server belum tersedia;
-5. simpan `activated = true` setelah sukses;
+4. retry jika offline/server belum tersedia tanpa menulis local state;
+5. buat `activation_state.json` hanya setelah API sukses (`result = "0"`);
 6. delete Scheduled Task;
 7. exit.
 

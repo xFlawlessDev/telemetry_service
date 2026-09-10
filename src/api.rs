@@ -12,9 +12,7 @@ const DEVICE_LONGITUDE: Option<f64> = Some(107.60981);
 const DEVICE_ACCURACY_METERS: Option<f64> = Some(10.0);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActivationSuccess {
-    pub device_id: String,
-}
+pub struct ActivationSuccess;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActivationFailure {
@@ -52,7 +50,7 @@ impl ActivationClient {
     }
 
     async fn fetch_token(&self, install_id: Uuid) -> Result<String, ActivationFailure> {
-        let url = format!("{}/beta/validation/get_token/", self.base_url);
+        let url = format!("{}/validation/get_token/", self.base_url);
         let form = multipart::Form::new()
             .text("userId", self.user_id.to_owned())
             .text("apiKey", self.api_key.to_owned());
@@ -70,10 +68,10 @@ impl ActivationClient {
         let retry_after = retry_after(response.headers().get(RETRY_AFTER));
         if status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return extract_token(&body).ok_or_else(|| ActivationFailure::Retryable {
-                reason: format!("token response missing token field: {body}"),
-                retry_after: None,
-            });
+            if let Some(token) = extract_token(&body) {
+                return Ok(token);
+            }
+            return Err(classify_token_missing(&body));
         }
 
         let body = response.text().await.unwrap_or_default();
@@ -85,7 +83,7 @@ impl ActivationClient {
         install_id: Uuid,
         token: &str,
     ) -> Result<ActivationSuccess, ActivationFailure> {
-        let url = format!("{}/beta/axioo_on/create", self.base_url);
+        let url = format!("{}/axioo_on/create", self.base_url);
         let body = CreateDeviceRequest {
             serial_number: DEVICE_SERIAL_NUMBER,
             latitude: DEVICE_LATITUDE,
@@ -98,7 +96,7 @@ impl ActivationClient {
             .post(&url)
             .bearer_auth(token)
             .header("Idempotency-Key", install_id.to_string())
-            .json(&body)
+            .multipart(body.into_form())
             .send()
             .await
             .map_err(classify_reqwest_error)?;
@@ -106,9 +104,8 @@ impl ActivationClient {
         let status = response.status();
         let retry_after = retry_after(response.headers().get(RETRY_AFTER));
         if status.is_success() {
-            let raw = response.text().await.unwrap_or_default();
-            let device_id = extract_device_id(&raw).unwrap_or(raw);
-            return Ok(ActivationSuccess { device_id });
+            let body = response.text().await.unwrap_or_default();
+            return parse_create_device_success(&body);
         }
 
         let body = response.text().await.unwrap_or_default();
@@ -116,12 +113,25 @@ impl ActivationClient {
     }
 }
 
-#[derive(Debug, serde::Serialize)]
 struct CreateDeviceRequest {
     serial_number: &'static str,
     latitude: Option<f64>,
     longitude: Option<f64>,
     accuracy_meters: Option<f64>,
+}
+
+impl CreateDeviceRequest {
+    fn into_form(self) -> multipart::Form {
+        multipart::Form::new()
+            .text("serial_number", self.serial_number.to_owned())
+            .text("latitude", form_text_value(self.latitude))
+            .text("longitude", form_text_value(self.longitude))
+            .text("accuracy_meters", form_text_value(self.accuracy_meters))
+    }
+}
+
+fn form_text_value(value: Option<f64>) -> String {
+    value.map_or_else(|| "null".to_owned(), |number| number.to_string())
 }
 
 fn classify_reqwest_error(error: reqwest::Error) -> ActivationFailure {
@@ -210,39 +220,67 @@ pub fn extract_token(body: &str) -> Option<String> {
     None
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateDeviceEnvelope {
-    #[serde(alias = "device_id", alias = "deviceId")]
-    device_id: Option<String>,
-    id: Option<String>,
-    data: Option<CreateDeviceData>,
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+enum ResultCode {
+    Number(i64),
+    Text(String),
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateDeviceData {
-    #[serde(alias = "device_id", alias = "deviceId")]
-    device_id: Option<String>,
-    id: Option<String>,
-}
-
-#[must_use]
-pub fn extract_device_id(body: &str) -> Option<String> {
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if let Ok(envelope) = serde_json::from_str::<CreateDeviceEnvelope>(trimmed)
-        && let Some(id) = envelope
-            .device_id
-            .or(envelope.id)
-            .or(envelope.data.and_then(|data| data.device_id.or(data.id)))
-    {
-        let id = id.trim();
-        if !id.is_empty() {
-            return Some(id.to_owned());
+impl ResultCode {
+    fn is_success(&self) -> bool {
+        match self {
+            Self::Number(value) => *value == 0,
+            Self::Text(value) => value == "0",
         }
     }
-    None
+}
+
+impl std::fmt::Display for ResultCode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Number(value) => write!(formatter, "{value}"),
+            Self::Text(value) => formatter.write_str(value),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct BusinessEnvelope {
+    result: ResultCode,
+    #[serde(default)]
+    message: String,
+}
+
+fn parse_create_device_success(body: &str) -> Result<ActivationSuccess, ActivationFailure> {
+    let envelope = serde_json::from_str::<BusinessEnvelope>(body).map_err(|error| {
+        ActivationFailure::Retryable {
+            reason: format!("create response invalid JSON: {error}"),
+            retry_after: None,
+        }
+    })?;
+
+    if envelope.result.is_success() {
+        Ok(ActivationSuccess)
+    } else {
+        Err(ActivationFailure::Fatal(format!(
+            "create response result {}: {}",
+            envelope.result, envelope.message
+        )))
+    }
+}
+
+fn classify_token_missing(body: &str) -> ActivationFailure {
+    match serde_json::from_str::<BusinessEnvelope>(body) {
+        Ok(envelope) if !envelope.result.is_success() => ActivationFailure::Fatal(format!(
+            "token request result {}: {}",
+            envelope.result, envelope.message
+        )),
+        _ => ActivationFailure::Retryable {
+            reason: format!("token response missing token field: {body}"),
+            retry_after: None,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -309,46 +347,68 @@ mod tests {
     }
 
     #[test]
-    fn extract_device_id_should_read_top_level_field() {
+    fn parse_create_device_success_should_accept_zero_result() {
+        assert!(parse_create_device_success(r#"{"result":"0","message":"activated"}"#).is_ok());
+    }
+
+    #[test]
+    fn parse_create_device_success_should_accept_integer_zero_result() {
         assert_eq!(
-            extract_device_id(r#"{"device_id":"d-1"}"#),
-            Some("d-1".to_owned())
+            parse_create_device_success(r#"{"result":0,"message":"Save succeed"}"#).unwrap(),
+            ActivationSuccess
         );
     }
 
     #[test]
-    fn extract_device_id_should_read_nested_data() {
-        assert_eq!(
-            extract_device_id(r#"{"data":{"id":"d-2"}}"#),
-            Some("d-2".to_owned())
-        );
+    fn parse_create_device_success_should_reject_non_zero_result() {
+        assert!(matches!(
+            parse_create_device_success(r#"{"result":"1","message":"blocked"}"#),
+            Err(ActivationFailure::Fatal(_))
+        ));
     }
 
     #[test]
-    fn create_device_request_should_match_specified_payload() {
-        let request = CreateDeviceRequest {
-            serial_number: DEVICE_SERIAL_NUMBER,
-            latitude: DEVICE_LATITUDE,
-            longitude: DEVICE_LONGITUDE,
-            accuracy_meters: DEVICE_ACCURACY_METERS,
-        };
+    fn parse_create_device_success_should_surface_integer_error_message() {
+        match parse_create_device_success(
+            r#"{"result":-1,"message":"Serial number must be filled"}"#,
+        ) {
+            Err(ActivationFailure::Fatal(reason)) => {
+                assert!(
+                    reason.contains("Serial number must be filled"),
+                    "reason: {reason}"
+                );
+            }
+            other => panic!("expected fatal failure, got {other:?}"),
+        }
+    }
 
-        let json = serde_json::to_value(request).unwrap();
+    #[test]
+    fn classify_token_missing_should_treat_business_error_as_fatal() {
+        match classify_token_missing(r#"{"result":-1,"message":"Expired token"}"#) {
+            ActivationFailure::Fatal(reason) => {
+                assert!(reason.contains("Expired token"), "reason: {reason}");
+            }
+            other => panic!("expected fatal failure, got {other:?}"),
+        }
+    }
 
-        assert_eq!(json["serial_number"], "0223290070363009024");
-        assert_eq!(json["latitude"], -6.914744);
-        assert_eq!(json["longitude"], 107.60981);
-        assert_eq!(json["accuracy_meters"], 10.0);
+    #[test]
+    fn classify_token_missing_should_treat_unrecognized_body_as_retryable() {
+        assert!(matches!(
+            classify_token_missing(r#"{"status":"ok"}"#),
+            ActivationFailure::Retryable { .. }
+        ));
+    }
 
-        let nullable_request = CreateDeviceRequest {
-            serial_number: DEVICE_SERIAL_NUMBER,
-            latitude: None,
-            longitude: None,
-            accuracy_meters: None,
-        };
-        let nullable_json = serde_json::to_value(nullable_request).unwrap();
-        assert!(nullable_json["latitude"].is_null());
-        assert!(nullable_json["longitude"].is_null());
-        assert!(nullable_json["accuracy_meters"].is_null());
+    #[test]
+    fn form_text_value_should_encode_number_as_text() {
+        assert_eq!(form_text_value(DEVICE_LATITUDE), "-6.914744");
+        assert_eq!(form_text_value(DEVICE_LONGITUDE), "107.60981");
+        assert_eq!(form_text_value(DEVICE_ACCURACY_METERS), "10");
+    }
+
+    #[test]
+    fn form_text_value_should_encode_missing_coordinate_as_null_text() {
+        assert_eq!(form_text_value(None), "null");
     }
 }

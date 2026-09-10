@@ -8,7 +8,16 @@ const KEYS: &[&str] = &[
 ];
 
 fn main() {
+    println!("cargo:rerun-if-changed=assets/icon.ico");
     println!("cargo:rerun-if-changed=.env");
+
+    #[cfg(windows)]
+    {
+        winresource::WindowsResource::new()
+            .set_icon("assets/icon.ico")
+            .compile()
+            .expect("failed to embed Windows executable icon");
+    }
 
     if let Ok(contents) = fs::read_to_string(Path::new(".env")) {
         for line in contents.lines().filter_map(parse_env_line) {
