@@ -59,4 +59,5 @@ if %errorLevel% == 0 (
 
     echo [install] master prepared; do not install startup entry until post-clone
     echo [install] done
+    pause
     exit /B 0

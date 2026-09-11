@@ -64,4 +64,5 @@ if %errorLevel% == 0 (
 
     echo [postclone] activation startup entry installed; agent runs at first user login
     echo [postclone] done
+    pause
     exit /B 0

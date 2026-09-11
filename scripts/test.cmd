@@ -44,4 +44,5 @@ if not "%EXIT_CODE%"=="0" (
 )
 
 echo [test] dry-run only; nothing was posted to the API
+pause
 exit /B 0
