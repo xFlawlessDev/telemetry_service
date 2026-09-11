@@ -6,10 +6,23 @@ use uuid::Uuid;
 
 use crate::{config::AppConfig, error::AppResult};
 
-const DEVICE_SERIAL_NUMBER: &str = "0223290070363009024";
-const DEVICE_LATITUDE: Option<f64> = Some(-6.914744);
-const DEVICE_LONGITUDE: Option<f64> = Some(107.60981);
-const DEVICE_ACCURACY_METERS: Option<f64> = Some(10.0);
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeviceRegistration {
+    pub serial_number: String,
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub accuracy_meters: Option<f64>,
+}
+
+impl DeviceRegistration {
+    fn into_form(self) -> multipart::Form {
+        multipart::Form::new()
+            .text("serial_number", self.serial_number)
+            .text("latitude", form_text_value(self.latitude))
+            .text("longitude", form_text_value(self.longitude))
+            .text("accuracy_meters", form_text_value(self.accuracy_meters))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActivationSuccess;
@@ -43,10 +56,14 @@ impl ActivationClient {
         })
     }
 
-    pub async fn activate(&self, install_id: Uuid) -> Result<ActivationSuccess, ActivationFailure> {
+    pub async fn activate(
+        &self,
+        install_id: Uuid,
+        device: &DeviceRegistration,
+    ) -> Result<ActivationSuccess, ActivationFailure> {
         let token = self.fetch_token(install_id).await?;
 
-        self.create_device(install_id, &token).await
+        self.create_device(install_id, &token, device).await
     }
 
     async fn fetch_token(&self, install_id: Uuid) -> Result<String, ActivationFailure> {
@@ -82,21 +99,16 @@ impl ActivationClient {
         &self,
         install_id: Uuid,
         token: &str,
+        device: &DeviceRegistration,
     ) -> Result<ActivationSuccess, ActivationFailure> {
         let url = format!("{}/axioo_on/create", self.base_url);
-        let body = CreateDeviceRequest {
-            serial_number: DEVICE_SERIAL_NUMBER,
-            latitude: DEVICE_LATITUDE,
-            longitude: DEVICE_LONGITUDE,
-            accuracy_meters: DEVICE_ACCURACY_METERS,
-        };
 
         let response = self
             .client
             .post(&url)
             .bearer_auth(token)
             .header("Idempotency-Key", install_id.to_string())
-            .multipart(body.into_form())
+            .multipart(device.clone().into_form())
             .send()
             .await
             .map_err(classify_reqwest_error)?;
@@ -113,35 +125,18 @@ impl ActivationClient {
     }
 }
 
-struct CreateDeviceRequest {
-    serial_number: &'static str,
-    latitude: Option<f64>,
-    longitude: Option<f64>,
-    accuracy_meters: Option<f64>,
-}
-
-impl CreateDeviceRequest {
-    fn into_form(self) -> multipart::Form {
-        multipart::Form::new()
-            .text("serial_number", self.serial_number.to_owned())
-            .text("latitude", form_text_value(self.latitude))
-            .text("longitude", form_text_value(self.longitude))
-            .text("accuracy_meters", form_text_value(self.accuracy_meters))
-    }
-}
-
 fn form_text_value(value: Option<f64>) -> String {
     value.map_or_else(|| "null".to_owned(), |number| number.to_string())
 }
 
 #[must_use]
-pub fn payload_debug_string() -> String {
+pub fn payload_debug_string(device: &DeviceRegistration) -> String {
     format!(
         "serial_number={} latitude={} longitude={} accuracy_meters={}",
-        DEVICE_SERIAL_NUMBER,
-        form_text_value(DEVICE_LATITUDE),
-        form_text_value(DEVICE_LONGITUDE),
-        form_text_value(DEVICE_ACCURACY_METERS)
+        device.serial_number,
+        form_text_value(device.latitude),
+        form_text_value(device.longitude),
+        form_text_value(device.accuracy_meters)
     )
 }
 
@@ -423,9 +418,9 @@ mod tests {
 
     #[test]
     fn form_text_value_should_encode_number_as_text() {
-        assert_eq!(form_text_value(DEVICE_LATITUDE), "-6.914744");
-        assert_eq!(form_text_value(DEVICE_LONGITUDE), "107.60981");
-        assert_eq!(form_text_value(DEVICE_ACCURACY_METERS), "10");
+        assert_eq!(form_text_value(Some(-6.914744)), "-6.914744");
+        assert_eq!(form_text_value(Some(107.60981)), "107.60981");
+        assert_eq!(form_text_value(Some(10.0)), "10");
     }
 
     #[test]
@@ -435,9 +430,18 @@ mod tests {
 
     #[test]
     fn payload_debug_string_should_include_serial_number_and_coordinates() {
-        let payload = payload_debug_string();
+        let device = DeviceRegistration {
+            serial_number: "0223290070363009024".to_owned(),
+            latitude: Some(-6.914744),
+            longitude: Some(107.60981),
+            accuracy_meters: Some(10.0),
+        };
+        let payload = payload_debug_string(&device);
 
-        assert!(payload.contains(DEVICE_SERIAL_NUMBER), "payload: {payload}");
+        assert!(
+            payload.contains("serial_number=0223290070363009024"),
+            "payload: {payload}"
+        );
         assert!(payload.contains("latitude=-6.914744"), "payload: {payload}");
         assert!(payload.contains("accuracy_meters=10"), "payload: {payload}");
     }

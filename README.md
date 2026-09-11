@@ -71,10 +71,10 @@ Idempotency-Key: {install_id}
 Payload fields:
 
 ```text
-serial_number=0223290070363009024
-latitude=-6.914744
-longitude=107.60981
-accuracy_meters=10
+serial_number={hardware serial from Win32_BIOS/Win32_BaseBoard/Win32_ComputerSystemProduct}
+latitude={Windows geolocation latitude}
+longitude={Windows geolocation longitude}
+accuracy_meters={Windows geolocation accuracy}
 ```
 
 Only `serial_number`, `latitude`, `longitude`, and `accuracy_meters` are posted to the create endpoint. All payload fields are sent as form-data text fields.

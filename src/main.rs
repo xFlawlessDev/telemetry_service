@@ -4,6 +4,8 @@ mod api;
 mod autostart;
 mod config;
 mod error;
+mod hardware;
+mod location;
 mod logging;
 mod paths;
 mod retry;
@@ -13,9 +15,10 @@ use std::{env, time::Duration};
 
 use tokio::{fs, time::sleep};
 
-use api::{ActivationClient, ActivationFailure, payload_debug_string};
+use api::{ActivationClient, ActivationFailure, DeviceRegistration, payload_debug_string};
 use config::AppConfig;
 use error::{AppError, AppResult};
+use hardware::collect_hardware_identity;
 use paths::AppPaths;
 use state::{load_existing_or_new_state, now_utc, save_state_atomic};
 use tracing::{error, info, warn};
@@ -50,7 +53,13 @@ async fn main() {
     }
 
     if options.dry_run {
-        println!("dry-run (no POST): {}", payload_debug_string());
+        match collect_device_registration(&config).await {
+            Ok(device) => println!("dry-run (no POST): {}", payload_debug_string(&device)),
+            Err(error) => {
+                eprintln!("dry-run failed: {error}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
 
@@ -123,11 +132,6 @@ async fn remove_dir_if_exists(path: &std::path::Path) -> AppResult<()> {
 
 async fn run(config: AppConfig, paths: AppPaths, options: RuntimeOptions) -> AppResult<()> {
     info!(state = %paths.state_file.display(), log = %paths.log_file.display(), data_dir = %paths.data_dir.display(), "activation agent startup");
-    if options.print_payload {
-        let payload = payload_debug_string();
-        println!("{payload}");
-        info!(%payload, "activation payload");
-    }
     let mut state = load_existing_or_new_state(&paths.state_file).await?;
     info!(install_id = %state.install_id, activated = state.activated, attempts = state.attempt_count, "state loaded");
 
@@ -136,12 +140,19 @@ async fn run(config: AppConfig, paths: AppPaths, options: RuntimeOptions) -> App
         return Ok(());
     }
 
+    let device = collect_device_registration(&config).await?;
+    if options.print_payload {
+        let payload = payload_debug_string(&device);
+        println!("{payload}");
+        info!(%payload, "activation payload");
+    }
+
     let client = ActivationClient::new(&config)?;
 
     loop {
         state.record_attempt(now_utc());
 
-        match client.activate(state.install_id).await {
+        match client.activate(state.install_id, &device).await {
             Ok(_) => {
                 state.mark_activated(state.install_id.to_string());
                 save_state_atomic(&paths.state_file, &state).await?;
@@ -166,6 +177,33 @@ async fn run(config: AppConfig, paths: AppPaths, options: RuntimeOptions) -> App
             }
         }
     }
+}
+
+async fn collect_device_registration(config: &AppConfig) -> AppResult<DeviceRegistration> {
+    let hardware = collect_hardware_identity()?;
+    let serial_number = hardware.serial_number().ok_or_else(|| {
+        AppError::FatalActivation("no usable hardware serial number found".to_owned())
+    })?;
+    let location = location::get_location(config.geolocation_timeout).await;
+    if location.latitude.is_none() || location.longitude.is_none() {
+        warn!(
+            access_status = %location.access_status,
+            "geolocation unavailable; coordinates will be sent as null"
+        );
+    }
+    info!(
+        has_identifier = hardware.has_identifier(),
+        serial_number,
+        access_status = %location.access_status,
+        has_coordinates = location.latitude.is_some() && location.longitude.is_some(),
+        "device identity collected"
+    );
+    Ok(DeviceRegistration {
+        serial_number: serial_number.to_owned(),
+        latitude: location.latitude,
+        longitude: location.longitude,
+        accuracy_meters: location.accuracy_meters,
+    })
 }
 
 async fn cleanup_autostart(config: &AppConfig) -> AppResult<()> {

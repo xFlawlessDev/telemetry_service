@@ -16,6 +16,14 @@ impl HardwareIdentity {
     pub fn has_identifier(&self) -> bool {
         self.bios_serial.is_some() || self.system_uuid.is_some() || self.baseboard_serial.is_some()
     }
+
+    #[must_use]
+    pub fn serial_number(&self) -> Option<&str> {
+        self.bios_serial
+            .as_deref()
+            .or(self.baseboard_serial.as_deref())
+            .or(self.system_uuid.as_deref())
+    }
 }
 
 #[cfg(windows)]
@@ -144,5 +152,34 @@ mod tests {
             normalize_identifier(Some(" ABC123 ")),
             Some("ABC123".to_owned())
         );
+    }
+
+    #[test]
+    fn serial_number_should_prefer_bios_then_baseboard_then_uuid() {
+        let full = HardwareIdentity {
+            bios_serial: Some("BIOS".to_owned()),
+            baseboard_serial: Some("BOARD".to_owned()),
+            system_uuid: Some("UUID".to_owned()),
+            ..HardwareIdentity::default()
+        };
+        assert_eq!(full.serial_number(), Some("BIOS"));
+
+        let board_only = HardwareIdentity {
+            baseboard_serial: Some("BOARD".to_owned()),
+            system_uuid: Some("UUID".to_owned()),
+            ..HardwareIdentity::default()
+        };
+        assert_eq!(board_only.serial_number(), Some("BOARD"));
+
+        let uuid_only = HardwareIdentity {
+            system_uuid: Some("UUID".to_owned()),
+            ..HardwareIdentity::default()
+        };
+        assert_eq!(uuid_only.serial_number(), Some("UUID"));
+    }
+
+    #[test]
+    fn serial_number_should_return_none_without_identifiers() {
+        assert_eq!(HardwareIdentity::default().serial_number(), None);
     }
 }
