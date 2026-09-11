@@ -6,6 +6,9 @@ use tracing::warn;
 
 use crate::error::{AppError, AppResult};
 
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 pub async fn install_autostart(entry_name: &str, executable: &Path) -> AppResult<()> {
     build_auto_launch(entry_name, executable)?.enable()?;
     remove_legacy_task(entry_name).await;
@@ -33,10 +36,12 @@ fn build_auto_launch(entry_name: &str, executable: &Path) -> AppResult<AutoLaunc
 }
 
 async fn remove_legacy_task(task_name: &str) {
-    let output = Command::new("schtasks")
-        .args(["/Delete", "/TN", task_name, "/F"])
-        .output()
-        .await;
+    let mut command = Command::new("schtasks");
+    command.args(["/Delete", "/TN", task_name, "/F"]);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+
+    let output = command.output().await;
 
     match output {
         Ok(output)
