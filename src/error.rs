@@ -21,12 +21,8 @@ pub enum AppError {
     Windows(#[from] windows::core::Error),
     #[error("HTTP client error: {0}")]
     Http(#[from] reqwest::Error),
-    #[error("process `{program}` failed with status {status}: {stderr}")]
-    ProcessFailure {
-        program: &'static str,
-        status: String,
-        stderr: String,
-    },
+    #[error("autostart error: {0}")]
+    Autostart(#[from] auto_launch::Error),
     #[error("activation failed permanently: {0}")]
     FatalActivation(String),
 }

@@ -134,6 +134,17 @@ fn form_text_value(value: Option<f64>) -> String {
     value.map_or_else(|| "null".to_owned(), |number| number.to_string())
 }
 
+#[must_use]
+pub fn payload_debug_string() -> String {
+    format!(
+        "serial_number={} latitude={} longitude={} accuracy_meters={}",
+        DEVICE_SERIAL_NUMBER,
+        form_text_value(DEVICE_LATITUDE),
+        form_text_value(DEVICE_LONGITUDE),
+        form_text_value(DEVICE_ACCURACY_METERS)
+    )
+}
+
 fn classify_reqwest_error(error: reqwest::Error) -> ActivationFailure {
     if error.is_timeout() || error.is_connect() || error.is_request() || error.is_decode() {
         ActivationFailure::Retryable {
@@ -177,36 +188,16 @@ fn retry_after(value: Option<&reqwest::header::HeaderValue>) -> Option<Duration>
         .map(Duration::from_secs)
 }
 
-#[derive(Debug, Deserialize)]
-struct TokenEnvelope {
-    token: Option<String>,
-    #[serde(alias = "access_token", alias = "accessToken")]
-    access_token: Option<String>,
-    data: Option<TokenData>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TokenData {
-    token: Option<String>,
-    #[serde(alias = "access_token", alias = "accessToken")]
-    access_token: Option<String>,
-}
-
 #[must_use]
 pub fn extract_token(body: &str) -> Option<String> {
     let trimmed = body.trim();
     if trimmed.is_empty() {
         return None;
     }
-    if let Ok(envelope) = serde_json::from_str::<TokenEnvelope>(trimmed)
-        && let Some(token) = envelope.token.or(envelope.access_token).or(envelope
-            .data
-            .and_then(|data| data.token.or(data.access_token)))
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+        && let Some(token) = find_token_field(&value)
     {
-        let token = token.trim();
-        if !token.is_empty() {
-            return Some(token.to_owned());
-        }
+        return Some(token);
     }
     if let Some(raw) = trimmed
         .strip_prefix("Bearer ")
@@ -218,6 +209,26 @@ pub fn extract_token(body: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn find_token_field(value: &serde_json::Value) -> Option<String> {
+    const TOKEN_KEYS: &[&str] = &["token", "Token", "access_token", "accessToken"];
+
+    match value {
+        serde_json::Value::Object(map) => {
+            for key in TOKEN_KEYS {
+                if let Some(serde_json::Value::String(token)) = map.get(*key) {
+                    let token = token.trim();
+                    if !token.is_empty() {
+                        return Some(token.to_owned());
+                    }
+                }
+            }
+            map.values().find_map(find_token_field)
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(find_token_field),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -336,6 +347,16 @@ mod tests {
     }
 
     #[test]
+    fn extract_token_should_read_data_array_token_field() {
+        assert_eq!(
+            extract_token(
+                r#"{"result":"0","message":"Success","data":[{"ExpiredDate":"2026-09-11 10:46:40.000","Token":"abc123"}]}"#
+            ),
+            Some("abc123".to_owned())
+        );
+    }
+
+    #[test]
     fn extract_token_should_strip_bearer_prefix() {
         assert_eq!(extract_token("Bearer abc123"), Some("abc123".to_owned()));
     }
@@ -410,5 +431,14 @@ mod tests {
     #[test]
     fn form_text_value_should_encode_missing_coordinate_as_null_text() {
         assert_eq!(form_text_value(None), "null");
+    }
+
+    #[test]
+    fn payload_debug_string_should_include_serial_number_and_coordinates() {
+        let payload = payload_debug_string();
+
+        assert!(payload.contains(DEVICE_SERIAL_NUMBER), "payload: {payload}");
+        assert!(payload.contains("latitude=-6.914744"), "payload: {payload}");
+        assert!(payload.contains("accuracy_meters=10"), "payload: {payload}");
     }
 }

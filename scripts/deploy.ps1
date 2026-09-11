@@ -4,15 +4,15 @@ Deploy Telemetry Service activation agent for manufacturing Windows images.
 
 .DESCRIPTION
 Copies telemetry_service.exe to Program Files, resets activation state/logs, and manages
-TelemetryServiceActivation Scheduled Task through the agent CLI.
+the registry Run startup entry through the agent CLI.
 
 Modes:
-- UserModeMaster: prepare a clone master; copy binary, remove task, reset state.
-- PostClone: run on final cloned machine; copy binary, reset state, install task.
-- AuditOobe: run in Audit Mode before sysprep /oobe /shutdown; copy binary, reset state, install task.
-- QcCleanup: run after QC test; remove task, reset state, install task.
-- InstallOnly: copy binary and install task.
-- RemoveOnly: remove task only.
+- UserModeMaster: prepare a clone master; copy binary, remove startup entry, reset state.
+- PostClone: run on final cloned machine; copy binary, reset state, install startup entry.
+- AuditOobe: run in Audit Mode before sysprep /oobe /shutdown; copy binary, reset state, install startup entry.
+- QcCleanup: run after QC test; remove startup entry, reset state, install startup entry.
+- InstallOnly: copy binary and install startup entry.
+- RemoveOnly: remove startup entry only.
 
 .EXAMPLE
 powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1 -Mode AuditOobe
@@ -92,12 +92,12 @@ function Reset-AgentState {
     Invoke-Agent -Arguments @('--reset-state')
 }
 
-function Install-AgentTask {
-    Invoke-Agent -Arguments @('--install-task')
+function Install-AgentStartup {
+    Invoke-Agent -Arguments @('--install-startup')
 }
 
-function Remove-AgentTask {
-    Invoke-Agent -Arguments @('--remove-task')
+function Remove-AgentStartup {
+    Invoke-Agent -Arguments @('--remove-startup')
 }
 
 if (-not $SkipAdminCheck -and -not (Test-IsAdministrator)) {
@@ -109,37 +109,37 @@ Write-Step "mode: $Mode"
 switch ($Mode) {
     'UserModeMaster' {
         Copy-AgentBinary
-        Remove-AgentTask
+        Remove-AgentStartup
         Reset-AgentState
-        Write-Step 'master prepared; do not install active task until post-clone'
+        Write-Step 'master prepared; do not install startup entry until post-clone'
     }
     'PostClone' {
         Copy-AgentBinary
         Reset-AgentState
-        Install-AgentTask
-        Write-Step 'post-clone activation task installed'
+        Install-AgentStartup
+        Write-Step 'post-clone activation startup entry installed'
     }
     'AuditOobe' {
         Copy-AgentBinary
         Reset-AgentState
-        Install-AgentTask
+        Install-AgentStartup
         Write-Step 'Audit/OOBE image prepared; run sysprep /oobe /shutdown when ready'
     }
     'QcCleanup' {
         Copy-AgentBinary
-        Remove-AgentTask
+        Remove-AgentStartup
         Reset-AgentState
-        Install-AgentTask
-        Write-Step 'QC cleanup complete; state reset and task installed'
+        Install-AgentStartup
+        Write-Step 'QC cleanup complete; state reset and startup entry installed'
     }
     'InstallOnly' {
         Copy-AgentBinary
-        Install-AgentTask
-        Write-Step 'task installed'
+        Install-AgentStartup
+        Write-Step 'startup entry installed'
     }
     'RemoveOnly' {
-        Remove-AgentTask
-        Write-Step 'task removed'
+        Remove-AgentStartup
+        Write-Step 'startup entry removed'
     }
 }
 

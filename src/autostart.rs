@@ -1,69 +1,60 @@
-use std::{path::Path, process::ExitStatus};
+use std::{env, path::Path};
 
+use auto_launch::{AutoLaunch, AutoLaunchBuilder, WindowsEnableMode};
 use tokio::process::Command;
+use tracing::warn;
 
 use crate::error::{AppError, AppResult};
 
-pub async fn install_autostart(task_name: &str, executable: &Path) -> AppResult<()> {
-    let task_run = task_run_argument(executable);
-    let output = Command::new("schtasks")
-        .args([
-            "/Create", "/TN", task_name, "/SC", "ONLOGON", "/RL", "LIMITED", "/TR", &task_run, "/F",
-        ])
-        .output()
-        .await;
-
-    let output = match output {
-        Ok(output) => output,
-        Err(source) => {
-            return Err(AppError::Io {
-                path: "schtasks".into(),
-                source,
-            });
-        }
-    };
-
-    if output.status.success() {
-        return Ok(());
-    }
-
-    Err(process_failure(output.status, output.stderr))
+pub async fn install_autostart(entry_name: &str, executable: &Path) -> AppResult<()> {
+    build_auto_launch(entry_name, executable)?.enable()?;
+    remove_legacy_task(entry_name).await;
+    Ok(())
 }
 
-pub async fn disable_autostart(task_name: &str) -> AppResult<()> {
+pub async fn disable_autostart(entry_name: &str) -> AppResult<()> {
+    let executable = env::current_exe().map_err(|source| AppError::Io {
+        path: "current executable".into(),
+        source,
+    })?;
+    build_auto_launch(entry_name, &executable)?.disable()?;
+    remove_legacy_task(entry_name).await;
+    Ok(())
+}
+
+fn build_auto_launch(entry_name: &str, executable: &Path) -> AppResult<AutoLaunch> {
+    let quoted_path = format!("\"{}\"", executable.display());
+    AutoLaunchBuilder::new()
+        .set_app_name(entry_name)
+        .set_app_path(&quoted_path)
+        .set_windows_enable_mode(WindowsEnableMode::Dynamic)
+        .build()
+        .map_err(AppError::from)
+}
+
+async fn remove_legacy_task(task_name: &str) {
     let output = Command::new("schtasks")
         .args(["/Delete", "/TN", task_name, "/F"])
         .output()
         .await;
 
-    let output = match output {
-        Ok(output) => output,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(source) => {
-            return Err(AppError::Io {
-                path: "schtasks".into(),
-                source,
-            });
+    match output {
+        Ok(output)
+            if output.status.success()
+                || task_not_found(&output.stderr)
+                || task_not_found(&output.stdout) => {}
+        Ok(output) => {
+            warn!(
+                task = task_name,
+                status = output.status.to_string(),
+                "legacy scheduled task cleanup failed"
+            );
         }
-    };
-
-    if output.status.success() || task_not_found(&output.stderr) || task_not_found(&output.stdout) {
-        return Ok(());
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            warn!(task = task_name, %error, "legacy scheduled task cleanup failed");
+        }
     }
-
-    Err(process_failure(output.status, output.stderr))
-}
-
-fn process_failure(status: ExitStatus, stderr: Vec<u8>) -> AppError {
-    AppError::ProcessFailure {
-        program: "schtasks",
-        status: status.to_string(),
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
-    }
-}
-
-fn task_run_argument(executable: &Path) -> String {
-    format!("\"{}\"", executable.display())
 }
 
 fn task_not_found(bytes: &[u8]) -> bool {
@@ -82,17 +73,5 @@ mod tests {
         assert!(task_not_found(
             b"ERROR: The system cannot find the file specified."
         ));
-    }
-
-    #[test]
-    fn task_run_argument_should_quote_executable_path() {
-        let task_run = task_run_argument(Path::new(
-            r"C:\Program Files\TelemetryService\telemetry.exe",
-        ));
-
-        assert_eq!(
-            task_run,
-            r#""C:\Program Files\TelemetryService\telemetry.exe""#
-        );
     }
 }

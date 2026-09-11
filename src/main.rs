@@ -13,7 +13,7 @@ use std::{env, time::Duration};
 
 use tokio::{fs, time::sleep};
 
-use api::{ActivationClient, ActivationFailure};
+use api::{ActivationClient, ActivationFailure, payload_debug_string};
 use config::AppConfig;
 use error::{AppError, AppResult};
 use paths::AppPaths;
@@ -22,8 +22,8 @@ use tracing::{error, info, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CliCommand {
-    InstallTask,
-    RemoveTask,
+    InstallStartup,
+    RemoveStartup,
     ResetState,
 }
 
@@ -31,6 +31,7 @@ enum CliCommand {
 struct RuntimeOptions {
     once: bool,
     print_payload: bool,
+    dry_run: bool,
     command: Option<CliCommand>,
 }
 
@@ -45,6 +46,11 @@ async fn main() {
             eprintln!("command failed: {error}");
             std::process::exit(1);
         }
+        return;
+    }
+
+    if options.dry_run {
+        println!("dry-run (no POST): {}", payload_debug_string());
         return;
     }
 
@@ -68,17 +74,17 @@ async fn run_cli_command(
     paths: &AppPaths,
 ) -> AppResult<()> {
     match command {
-        CliCommand::InstallTask => {
+        CliCommand::InstallStartup => {
             let executable = env::current_exe().map_err(|source| AppError::Io {
                 path: "current executable".into(),
                 source,
             })?;
             autostart::install_autostart(config.task_name, &executable).await?;
-            println!("installed scheduled task `{}`", config.task_name);
+            println!("installed startup entry `{}`", config.task_name);
         }
-        CliCommand::RemoveTask => {
+        CliCommand::RemoveStartup => {
             autostart::disable_autostart(config.task_name).await?;
-            println!("removed scheduled task `{}`", config.task_name);
+            println!("removed startup entry `{}`", config.task_name);
         }
         CliCommand::ResetState => {
             reset_local_state(paths).await?;
@@ -117,6 +123,11 @@ async fn remove_dir_if_exists(path: &std::path::Path) -> AppResult<()> {
 
 async fn run(config: AppConfig, paths: AppPaths, options: RuntimeOptions) -> AppResult<()> {
     info!(state = %paths.state_file.display(), log = %paths.log_file.display(), data_dir = %paths.data_dir.display(), "activation agent startup");
+    if options.print_payload {
+        let payload = payload_debug_string();
+        println!("{payload}");
+        info!(%payload, "activation payload");
+    }
     let mut state = load_existing_or_new_state(&paths.state_file).await?;
     info!(install_id = %state.install_id, activated = state.activated, attempts = state.attempt_count, "state loaded");
 
@@ -181,8 +192,9 @@ fn parse_options(args: impl IntoIterator<Item = String>) -> RuntimeOptions {
         match arg.as_str() {
             "--once" => options.once = true,
             "--print-payload" => options.print_payload = true,
-            "--install-task" => options.command = Some(CliCommand::InstallTask),
-            "--remove-task" => options.command = Some(CliCommand::RemoveTask),
+            "--dry-run" => options.dry_run = true,
+            "--install-startup" => options.command = Some(CliCommand::InstallStartup),
+            "--remove-startup" => options.command = Some(CliCommand::RemoveStartup),
             "--reset-state" => options.command = Some(CliCommand::ResetState),
             _ => {}
         }
@@ -203,10 +215,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_options_should_enable_install_task_command() {
-        let options = parse_options(["--install-task".to_owned()]);
+    fn parse_options_should_enable_dry_run() {
+        let options = parse_options(["--dry-run".to_owned()]);
 
-        assert_eq!(options.command, Some(CliCommand::InstallTask));
+        assert!(options.dry_run);
+    }
+
+    #[test]
+    fn parse_options_should_enable_install_startup_command() {
+        let options = parse_options(["--install-startup".to_owned()]);
+
+        assert_eq!(options.command, Some(CliCommand::InstallStartup));
     }
 
     #[test]

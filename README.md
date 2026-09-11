@@ -4,14 +4,14 @@ Windows activation background agent written in Rust.
 
 ## Behavior
 
-- Starts under a Windows Scheduled Task at boot or login.
+- Starts automatically at user logon via the registry `Run` key.
 - Loads existing local activation state, or keeps new state in memory until server success.
 - Collects hardware serial number.
 - Collects optional Windows geolocation coordinates.
 - Posts activation payload to `https://register.axiooworld.com/axioo_on/create`.
 - Retries retryable network/server failures with exponential backoff and jitter.
 - Marks local state as activated after server success.
-- Deletes the activation Scheduled Task after success.
+- Removes its startup entry after successful activation.
 - Does not self-delete its own executable.
 
 
@@ -22,13 +22,13 @@ Startup flow:
 1. Discover data, state, and log paths.
 2. Initialize file logging.
 3. Load `activation_state.json` if it already exists; otherwise keep fresh state in memory only.
-4. If `activated = true`, delete the Scheduled Task and exit.
+4. If `activated = true`, remove the startup entry and exit.
 5. Increment in-memory `attempt_count` and set `last_attempt_utc`.
 6. Collect hardware serial number.
 7. Collect optional Windows geolocation with timeout.
 8. Build activation payload.
 9. `POST` payload to `https://register.axiooworld.com/axioo_on/create`.
-10. On API success (`result = 0`), store local state, delete Scheduled Task, and exit.
+10. On API success (`result = 0`), store local state, remove the startup entry, and exit.
 11. On retryable failure, keep local state unsaved, sleep with backoff, then retry.
 12. On fatal failure, keep local state unsaved and exit with error.
 
@@ -162,19 +162,25 @@ Run one activation attempt, then exit on retryable failure without writing local
 --print-payload
 ```
 
-Print the serialized activation payload to stdout for debugging.
+Print the serialized activation payload to stdout and the log file for debugging. Debug builds show the payload in the console; release builds are console-less, so read the payload from `%ProgramData%\TelemetryService\logs\activation.log`.
 
 ```text
---install-task
+--dry-run
 ```
 
-Create the `ONLOGON` Scheduled Task for the current executable path.
+Print the activation payload and exit without posting to the API and without writing activation state or logs. Release builds are console-less, so run `scripts\test.cmd` or redirect stdout to a file.
 
 ```text
---remove-task
+--install-startup
 ```
 
-Delete the Scheduled Task. Missing task is treated as success.
+Register the registry `Run` startup entry for the current executable path. When run elevated, the entry is written to `HKLM` (all users); otherwise it falls back to `HKCU` (current user only). Also removes any legacy `TelemetryServiceActivation` Scheduled Task.
+
+```text
+--remove-startup
+```
+
+Remove the startup entry. Missing entry is treated as success.
 
 ```text
 --reset-state
@@ -190,15 +196,15 @@ For Audit/OOBE or post-clone setup:
 
 ```powershell
 & "C:\Program Files\TelemetryService\telemetry_service.exe" --reset-state
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --install-task
+& "C:\Program Files\TelemetryService\telemetry_service.exe" --install-startup
 ```
 
 For QC cleanup after a manual test run:
 
 ```powershell
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --remove-task
+& "C:\Program Files\TelemetryService\telemetry_service.exe" --remove-startup
 & "C:\Program Files\TelemetryService\telemetry_service.exe" --reset-state
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --install-task
+& "C:\Program Files\TelemetryService\telemetry_service.exe" --install-startup
 ```
 
 Do not allow successful activation on the master image. Otherwise every clone can inherit activated local state.
@@ -211,27 +217,23 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1 -Mode AuditOobe -S
 ```
 
 See `docs/deployment-guide.md` for User Mode master, post-clone, Audit/OOBE, and QC cleanup flows.
-## Scheduled Task
+## Autostart (Registry Run Key)
 
-Recommended install command:
+The startup entry is the registry `Run` value `TelemetryServiceActivation`:
 
-```powershell
-schtasks /Create /TN "TelemetryServiceActivation" /SC ONLOGON /RL LIMITED /TR "C:\Program Files\TelemetryService\telemetry_service.exe" /F
+```text
+HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run
 ```
 
-Alternative boot task:
+When installed from an elevated session the entry is system-wide (all users), which is required for first-login activation after OOBE. The agent removes the entry after successful activation.
+
+Since the agent runs non-elevated in the user session, removing an `HKLM` entry may not be possible after activation succeeds. The leftover entry is harmless: on every logon the agent sees `activated = true` and exits immediately. It self-cleans when an admin logs in, or manually via `--remove-startup` from an elevated session.
+
+Verify the entry:
 
 ```powershell
-schtasks /Create /TN "TelemetryServiceActivation" /SC ONSTART /RL HIGHEST /TR "C:\Program Files\TelemetryService\telemetry_service.exe" /F
+Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" | Select-Object TelemetryServiceActivation
 ```
-
-Cleanup performed by the agent after activation:
-
-```powershell
-schtasks /Delete /TN "TelemetryServiceActivation" /F
-```
-
-Missing scheduled task is treated as cleanup success.
 
 ## Development
 
