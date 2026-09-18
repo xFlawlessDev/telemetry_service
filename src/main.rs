@@ -19,6 +19,7 @@ use api::{ActivationClient, ActivationFailure, DeviceRegistration, payload_debug
 use config::AppConfig;
 use error::{AppError, AppResult};
 use hardware::collect_hardware_identity;
+use location::BlockDecision;
 use paths::AppPaths;
 use state::{load_existing_or_new_state, now_utc, save_state_atomic};
 use tracing::{error, info, warn};
@@ -150,6 +151,10 @@ async fn run(config: AppConfig, paths: AppPaths, options: RuntimeOptions) -> App
     let client = ActivationClient::new(&config)?;
 
     loop {
+        if wait_until_outside_block_zone(&config).await {
+            return Ok(());
+        }
+
         state.record_attempt(now_utc());
 
         match client.activate(state.install_id, &device).await {
@@ -176,6 +181,34 @@ async fn run(config: AppConfig, paths: AppPaths, options: RuntimeOptions) -> App
                 sleep_with_log(delay).await;
             }
         }
+    }
+}
+
+async fn wait_until_outside_block_zone(config: &AppConfig) -> bool {
+    let Some(zone) = config.block_zone else {
+        return false;
+    };
+
+    loop {
+        let location = location::get_location(config.geolocation_timeout).await;
+        match zone.evaluate(&location) {
+            BlockDecision::Clear => return false,
+            BlockDecision::Blocked => {
+                info!(
+                    latitude = ?location.latitude,
+                    longitude = ?location.longitude,
+                    radius_meters = zone.radius_meters,
+                    "inside block zone; activation POST suppressed"
+                );
+            }
+            BlockDecision::Unknown => {
+                warn!(
+                    access_status = %location.access_status,
+                    "block zone active but coordinates unavailable; activation POST suppressed"
+                );
+            }
+        }
+        sleep_with_log(config.block_zone_poll_interval).await;
     }
 }
 

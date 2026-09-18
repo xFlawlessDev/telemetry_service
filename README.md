@@ -8,6 +8,7 @@ Windows activation background agent written in Rust.
 - Loads existing local activation state, or keeps new state in memory until server success.
 - Collects hardware serial number.
 - Collects optional Windows geolocation coordinates.
+- Optionally suppresses all POSTs while the device is inside a configured coordinate block zone.
 - Posts activation payload to `https://register.axiooworld.com/axioo_on/create`.
 - Retries retryable network/server failures with exponential backoff and jitter.
 - Marks local state as activated after server success.
@@ -26,11 +27,12 @@ Startup flow:
 5. Increment in-memory `attempt_count` and set `last_attempt_utc`.
 6. Collect hardware serial number.
 7. Collect optional Windows geolocation with timeout.
-8. Build activation payload.
-9. `POST` payload to `https://register.axiooworld.com/axioo_on/create`.
-10. On API success (`result = 0`), store local state, remove the startup entry, and exit.
-11. On retryable failure, keep local state unsaved, sleep with backoff, then retry.
-12. On fatal failure, keep local state unsaved and exit with error.
+8. If a block zone is configured and the device is inside it, sleep and re-check without posting.
+9. Build activation payload.
+10. `POST` payload to `https://register.axiooworld.com/axioo_on/create`.
+11. On API success (`result = 0`), store local state, remove the startup entry, and exit.
+12. On retryable failure, keep local state unsaved, sleep with backoff, then retry.
+13. On fatal failure, keep local state unsaved and exit with error.
 
 Retryable failures:
 
@@ -141,6 +143,18 @@ TELEMETRY_TASK_NAME=TelemetryServiceActivation
 ```
 
 Environment variables passed to `cargo build` override values from `.env`. If a key is missing, `src/config.rs` uses safe development placeholders.
+
+### Coordinate Block Zone
+
+The agent can suppress all POSTs while the device is physically inside a circular zone (for example, a manufacturing floor where devices must not activate yet).
+
+```text
+TELEMETRY_BLOCK_LATITUDE=-6.2
+TELEMETRY_BLOCK_LONGITUDE=106.816666
+TELEMETRY_BLOCK_RADIUS_METERS=1500
+```
+
+All three values are required to enable the zone; if any is missing or invalid, the block zone is disabled. The distance is computed with the Haversine formula against the current Windows geolocation fix. While the device is inside the radius, the agent logs the decision, sleeps for 5 minutes (`block_zone_poll_interval`), re-reads the location, and never sends the activation request. If coordinates are unavailable while the zone is configured, the POST is also suppressed to avoid activating a device that may be inside the zone.
 
 Other runtime defaults live in `src/config.rs`:
 
