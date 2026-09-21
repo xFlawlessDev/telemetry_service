@@ -13,7 +13,8 @@ Windows activation background agent written in Rust.
 - Retries retryable network/server failures with exponential backoff and jitter.
 - Marks local state as activated after server success.
 - Removes its startup task after successful activation.
-- Does not self-delete its own executable.
+- When launched by the scheduled task (`--self-delete-on-success`), also deletes its installed executable and folder.
+- Manual runs (`--once`, `--dry-run`, or without the flag) never delete the binary.
 
 
 ## Activation Logic
@@ -188,13 +189,19 @@ Print the activation payload and exit without posting to the API and without wri
 --install-startup
 ```
 
-Register a `TelemetryServiceActivation` Scheduled Task that runs at logon of any user, in that user's own session (`BUILTIN\Users` principal, interactive token). The task security descriptor is extended so the non-elevated agent can delete the task after activation, so runs are silent and require no UAC prompt. Must run elevated, because logon-trigger tasks need administrator rights. Install also removes any leftover registry `Run` entry from older versions.
+Register a `TelemetryServiceActivation` Scheduled Task that runs at logon of any user, in that user's own session (`BUILTIN\Users` principal, interactive token). The task security descriptor is extended so the non-elevated agent can delete the task after activation, so runs are silent and require no UAC prompt. It also grants `BUILTIN\Users` delete-only access to the installed binary and folder, so the agent can remove the app itself. Must run elevated, because logon-trigger tasks need administrator rights. Install also removes any leftover registry `Run` entry from older versions.
 
 ```text
 --remove-startup
 ```
 
 Delete the startup Scheduled Task. Missing task is treated as success, and any leftover registry `Run` entry is removed too.
+
+```text
+--self-delete-on-success
+```
+
+After activation succeeds, delete the installed executable and its folder. This flag is embedded in the Scheduled Task action; manual runs without it keep the binary in place. The app is removed only on success, so retrying offline is unaffected.
 
 ```text
 --reset-state
@@ -241,6 +248,8 @@ The startup task is `TelemetryServiceActivation` under the Task Scheduler root f
 
 Because the task grants `DELETE`, the non-elevated agent can remove its own task after successful activation. This is what makes the flow silent: no UAC prompt, no leftover startup entry, and no reliance on a later admin logon.
 
+Install also runs `icacls` to grant `BUILTIN\Users` delete-only rights (`D,DC`) on the install folder and binary. Delete-only means the user can remove the binary but cannot replace it, so there is no privilege escalation. Once the task action receives `--self-delete-on-success`, the agent also spawns a hidden helper that waits for the process to exit and then deletes the binary and folder.
+
 Install requires elevation because logon-trigger tasks are privileged. The agent itself always runs non-elevated.
 
 The task name also matches the legacy registry `Run` value; install and remove delete any such value from both `HKLM` and `HKCU`, so older deployments do not keep starting the agent.
@@ -256,6 +265,12 @@ Inspect the security descriptor that allows non-admin deletion:
 ```powershell
 $svc = New-Object -ComObject Schedule.Service; $svc.Connect()
 $svc.GetFolder('\').GetTask('TelemetryServiceActivation').GetSecurityDescriptor(0xF)
+```
+
+Inspect the delete-only file permissions:
+
+```powershell
+icacls "C:\Program Files\TelemetryService"
 ```
 
 ## Development

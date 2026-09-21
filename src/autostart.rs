@@ -79,7 +79,7 @@ fn install_scheduled_task(entry_name: &str, executable: &Path) -> AppResult<()> 
         let action = actions.Create(TASK_ACTION_EXEC)?;
         let exec = action.cast::<windows::Win32::System::TaskScheduler::IExecAction>()?;
         exec.SetPath(&BSTR::from(executable.display().to_string()))?;
-        exec.SetArguments(&BSTR::from(""))?;
+        exec.SetArguments(&BSTR::from("--self-delete-on-success"))?;
     }
 
     let folder = unsafe { service.GetFolder(&BSTR::from("\\"))? };

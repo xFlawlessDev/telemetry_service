@@ -6,7 +6,8 @@ Deploy Telemetry Service activation agent for manufacturing Windows images.
 Copies telemetry_service.exe to Program Files, resets activation state/logs, and manages
 the self-deleting Scheduled Task startup entry through the agent CLI. The task runs at
 logon of any user and grants Authenticated Users DELETE so the non-elevated agent can
-remove it after successful activation without a UAC prompt.
+remove it after successful activation without a UAC prompt. Delete-only file permissions
+are also granted so the agent removes its own binary and folder after success.
 
 Modes:
 - UserModeMaster: prepare a clone master; copy binary, remove startup entry, reset state.

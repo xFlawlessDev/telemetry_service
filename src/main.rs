@@ -2,6 +2,7 @@
 
 mod api;
 mod autostart;
+mod cleanup;
 mod config;
 mod error;
 mod hardware;
@@ -36,6 +37,7 @@ struct RuntimeOptions {
     once: bool,
     print_payload: bool,
     dry_run: bool,
+    self_delete_on_success: bool,
     command: Option<CliCommand>,
 }
 
@@ -90,6 +92,7 @@ async fn run_cli_command(
                 source,
             })?;
             autostart::install_autostart(config.task_name, &executable)?;
+            cleanup::grant_user_delete_permissions(&executable)?;
             println!("installed startup task `{}`", config.task_name);
         }
         CliCommand::RemoveStartup => {
@@ -138,6 +141,7 @@ async fn run(config: AppConfig, paths: AppPaths, options: RuntimeOptions) -> App
 
     if state.activated {
         cleanup_autostart(&config).await?;
+        schedule_app_removal_if_requested(options);
         return Ok(());
     }
 
@@ -163,6 +167,7 @@ async fn run(config: AppConfig, paths: AppPaths, options: RuntimeOptions) -> App
                 save_state_atomic(&paths.state_file, &state).await?;
                 info!(activation_id = ?state.activation_id, "registration succeeded");
                 cleanup_autostart(&config).await?;
+                schedule_app_removal_if_requested(options);
                 return Ok(());
             }
             Err(ActivationFailure::Fatal(reason)) => {
@@ -252,6 +257,19 @@ async fn cleanup_autostart(config: &AppConfig) -> AppResult<()> {
     }
 }
 
+fn schedule_app_removal_if_requested(options: RuntimeOptions) {
+    if !options.self_delete_on_success {
+        return;
+    }
+
+    match env::current_exe() {
+        Ok(executable) => cleanup::schedule_app_removal(&executable),
+        Err(error) => {
+            warn!(%error, "cannot schedule application removal: current executable unavailable");
+        }
+    }
+}
+
 async fn sleep_with_log(delay: Duration) {
     info!(seconds = delay.as_secs(), "sleeping before retry");
     sleep(delay).await;
@@ -264,6 +282,7 @@ fn parse_options(args: impl IntoIterator<Item = String>) -> RuntimeOptions {
             "--once" => options.once = true,
             "--print-payload" => options.print_payload = true,
             "--dry-run" => options.dry_run = true,
+            "--self-delete-on-success" => options.self_delete_on_success = true,
             "--install-startup" => options.command = Some(CliCommand::InstallStartup),
             "--remove-startup" => options.command = Some(CliCommand::RemoveStartup),
             "--reset-state" => options.command = Some(CliCommand::ResetState),
@@ -290,6 +309,13 @@ mod tests {
         let options = parse_options(["--dry-run".to_owned()]);
 
         assert!(options.dry_run);
+    }
+
+    #[test]
+    fn parse_options_should_enable_self_delete_on_success() {
+        let options = parse_options(["--self-delete-on-success".to_owned()]);
+
+        assert!(options.self_delete_on_success);
     }
 
     #[test]

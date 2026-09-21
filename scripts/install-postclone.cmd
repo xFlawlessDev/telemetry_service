@@ -6,7 +6,9 @@
 ::
 :: Run on the final cloned machine. Copies the binary if a source exists,
 :: resets activation state/logs, then installs the Scheduled Task startup entry
-:: so activation runs at first user login.
+:: so activation runs at first user login. --install-startup also grants
+:: delete-only file permissions so the agent removes its own binary and folder
+:: after successful activation (one-way; keep a source copy for QC/refurb).
 
 :: Check for administrative privileges
 net session >nul 2>&1
