@@ -7,6 +7,8 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult, io_error};
 
+pub const ACTIVATED_MARKER: &str = "activated";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivationState {
     pub install_id: Uuid,
@@ -44,6 +46,17 @@ impl ActivationState {
     }
 }
 
+pub async fn is_activated_marker(path: &Path) -> bool {
+    fs::try_exists(path).await.unwrap_or(false)
+}
+
+pub async fn mark_activated_marker(path: &Path) -> AppResult<()> {
+    create_parent_dir(path).await?;
+    fs::write(path, ACTIVATED_MARKER)
+        .await
+        .map_err(|source| io_error(path, source))
+}
+
 pub async fn load_existing_or_new_state(path: &Path) -> AppResult<ActivationState> {
     let result = match fs::read(path).await {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|source| AppError::StateJson {
@@ -67,11 +80,7 @@ pub async fn load_existing_or_new_state(path: &Path) -> AppResult<ActivationStat
 }
 
 pub async fn save_state_atomic(path: &Path, state: &ActivationState) -> AppResult<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .await
-            .map_err(|source| io_error(parent, source))?;
-    }
+    create_parent_dir(path).await?;
 
     let tmp_path = tmp_path_for(path);
     let bytes = serde_json::to_vec_pretty(state)?;
@@ -99,6 +108,15 @@ pub fn now_utc() -> String {
     OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
+}
+
+async fn create_parent_dir(path: &Path) -> AppResult<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|source| io_error(parent, source))?;
+    }
+    Ok(())
 }
 
 fn tmp_path_for(path: &Path) -> PathBuf {
@@ -159,5 +177,23 @@ mod tests {
                 .to_string_lossy()
                 .contains("corrupt")
         }));
+    }
+
+    #[tokio::test]
+    async fn is_activated_marker_should_be_false_when_marker_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("activated.marker");
+
+        assert!(!is_activated_marker(&path).await);
+    }
+
+    #[tokio::test]
+    async fn mark_activated_marker_should_create_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("activated.marker");
+
+        mark_activated_marker(&path).await.unwrap();
+
+        assert!(is_activated_marker(&path).await);
     }
 }

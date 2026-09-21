@@ -12,6 +12,7 @@ const KEYS: &[&str] = &[
     "TELEMETRY_BLOCK_LATITUDE",
     "TELEMETRY_BLOCK_LONGITUDE",
     "TELEMETRY_BLOCK_RADIUS_METERS",
+    "TELEMETRY_DEBUG",
 ];
 
 fn main() {

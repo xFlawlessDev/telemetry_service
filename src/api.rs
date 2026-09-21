@@ -444,7 +444,10 @@ mod tests {
             payload.contains("serial_number=0223290070363009024"),
             "payload: {payload}"
         );
-        assert!(payload.contains("coordinates=present"), "payload: {payload}");
+        assert!(
+            payload.contains("coordinates=present"),
+            "payload: {payload}"
+        );
         assert!(
             !payload.contains("latitude") && !payload.contains("longitude"),
             "payload: {payload}"

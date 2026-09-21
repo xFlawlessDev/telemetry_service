@@ -4,6 +4,12 @@ use crate::location::{BlockZone, GeoPoint};
 
 pub const DEFAULT_BLOCK_ZONE_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
+/// Build-time debug toggle. Set `TELEMETRY_DEBUG=1` in `.env` (or the process
+/// environment) to keep durable JSON activation state and write log files.
+/// When disabled, the agent only writes the `activated.marker` file and logs
+/// nothing, which is the production default.
+pub const DEBUG: bool = option_env!("TELEMETRY_DEBUG").is_some();
+
 #[derive(Debug, Clone, Copy)]
 pub struct AppConfig {
     pub base_url: &'static str,

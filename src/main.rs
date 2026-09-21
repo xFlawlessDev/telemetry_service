@@ -12,18 +12,18 @@ mod paths;
 mod retry;
 mod state;
 
-use std::{env, time::Duration};
+use std::{env, path::Path, time::Duration};
 
 use tokio::{fs, time::sleep};
+use tracing::{error, info, warn};
 
 use api::{ActivationClient, ActivationFailure, DeviceRegistration, payload_debug_string};
-use config::AppConfig;
+use config::{AppConfig, DEBUG};
 use error::{AppError, AppResult};
 use hardware::collect_hardware_identity;
 use location::BlockDecision;
 use paths::AppPaths;
 use state::{load_existing_or_new_state, now_utc, save_state_atomic};
-use tracing::{error, info, warn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CliCommand {
@@ -67,7 +67,7 @@ async fn main() {
     }
 
     let _log_guard = match logging::init_logging(&paths.log_dir) {
-        Ok(guard) => Some(guard),
+        Ok(guard) => guard,
         Err(error) => {
             eprintln!("failed to initialize file logging: {error}");
             None
@@ -76,6 +76,7 @@ async fn main() {
 
     if let Err(error) = run(config, paths, options).await {
         error!(%error, "activation agent failed");
+        eprintln!("activation agent failed: {error}");
         std::process::exit(1);
     }
 }
@@ -108,11 +109,12 @@ async fn run_cli_command(
 }
 
 async fn reset_local_state(paths: &AppPaths) -> AppResult<()> {
+    remove_file_if_exists(&paths.marker_file).await?;
     remove_file_if_exists(&paths.state_file).await?;
     remove_dir_if_exists(&paths.log_dir).await
 }
 
-async fn remove_file_if_exists(path: &std::path::Path) -> AppResult<()> {
+async fn remove_file_if_exists(path: &Path) -> AppResult<()> {
     match fs::remove_file(path).await {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -123,7 +125,7 @@ async fn remove_file_if_exists(path: &std::path::Path) -> AppResult<()> {
     }
 }
 
-async fn remove_dir_if_exists(path: &std::path::Path) -> AppResult<()> {
+async fn remove_dir_if_exists(path: &Path) -> AppResult<()> {
     match fs::remove_dir_all(path).await {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -135,9 +137,89 @@ async fn remove_dir_if_exists(path: &std::path::Path) -> AppResult<()> {
 }
 
 async fn run(config: AppConfig, paths: AppPaths, options: RuntimeOptions) -> AppResult<()> {
-    info!(state = %paths.state_file.display(), log = %paths.log_file.display(), data_dir = %paths.data_dir.display(), "activation agent startup");
+    info!(
+        debug = DEBUG,
+        state = %paths.state_file.display(),
+        log = %paths.log_file.display(),
+        data_dir = %paths.data_dir.display(),
+        "activation agent startup"
+    );
+
+    if DEBUG {
+        run_with_state(config, paths, options).await
+    } else {
+        run_stateless(config, paths, options).await
+    }
+}
+
+/// Production path: no durable JSON state, no attempt counters. Completion is
+/// tracked only by the `activated.marker` file so a machine never re-activates.
+async fn run_stateless(
+    config: AppConfig,
+    paths: AppPaths,
+    options: RuntimeOptions,
+) -> AppResult<()> {
+    if state::is_activated_marker(&paths.marker_file).await {
+        info!(marker = %paths.marker_file.display(), "already activated; skipping");
+        cleanup_autostart(&config).await?;
+        schedule_app_removal_if_requested(options);
+        return Ok(());
+    }
+
+    let device = collect_device_registration(&config).await?;
+    if options.print_payload {
+        println!("{}", payload_debug_string(&device));
+    }
+
+    let client = ActivationClient::new(&config)?;
+    let mut attempt_count: u64 = 0;
+
+    loop {
+        if wait_until_outside_block_zone(&config).await {
+            return Ok(());
+        }
+
+        attempt_count = attempt_count.saturating_add(1);
+        match client.activate(uuid::Uuid::new_v4(), &device).await {
+            Ok(_) => {
+                state::mark_activated_marker(&paths.marker_file).await?;
+                info!(marker = %paths.marker_file.display(), "registration succeeded");
+                cleanup_autostart(&config).await?;
+                schedule_app_removal_if_requested(options);
+                return Ok(());
+            }
+            Err(ActivationFailure::Fatal(reason)) => {
+                return Err(AppError::FatalActivation(reason));
+            }
+            Err(ActivationFailure::Retryable {
+                retry_after,
+                reason,
+            }) => {
+                warn!(%reason, "registration retryable failure");
+                if options.once || !config.retry_forever {
+                    return Ok(());
+                }
+                let delay =
+                    retry_after.unwrap_or_else(|| retry::backoff_delay(&config, attempt_count));
+                sleep_with_log(delay).await;
+            }
+        }
+    }
+}
+
+/// Debug path: durable JSON state with install id and attempt counters.
+async fn run_with_state(
+    config: AppConfig,
+    paths: AppPaths,
+    options: RuntimeOptions,
+) -> AppResult<()> {
     let mut state = load_existing_or_new_state(&paths.state_file).await?;
-    info!(install_id = %state.install_id, activated = state.activated, attempts = state.attempt_count, "state loaded");
+    info!(
+        install_id = %state.install_id,
+        activated = state.activated,
+        attempts = state.attempt_count,
+        "state loaded"
+    );
 
     if state.activated {
         cleanup_autostart(&config).await?;

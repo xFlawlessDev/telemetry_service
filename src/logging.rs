@@ -3,9 +3,14 @@ use std::path::Path;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
+use crate::config::DEBUG;
 use crate::error::{AppResult, io_error};
 
-pub fn init_logging(log_dir: &Path) -> AppResult<WorkerGuard> {
+pub fn init_logging(log_dir: &Path) -> AppResult<Option<WorkerGuard>> {
+    if !DEBUG {
+        return Ok(None);
+    }
+
     std::fs::create_dir_all(log_dir).map_err(|source| io_error(log_dir, source))?;
     let file_appender = tracing_appender::rolling::never(log_dir, "activation.log");
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
@@ -17,5 +22,5 @@ pub fn init_logging(log_dir: &Path) -> AppResult<WorkerGuard> {
         .with(fmt::layer().with_writer(non_blocking).with_ansi(false))
         .init();
 
-    Ok(guard)
+    Ok(Some(guard))
 }

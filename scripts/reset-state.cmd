@@ -5,8 +5,8 @@
 ::   reset-state.cmd [path\to\telemetry_service.exe]
 ::
 :: Reports the Scheduled Task and legacy registry Run startup entries, then
-:: stops the agent and removes activation state, corrupt snapshots, and logs
-:: from %ProgramData%\TelemetryService (plus the %LOCALAPPDATA% fallback).
+:: stops the agent and removes the completion marker plus any debug state and
+:: logs from %ProgramData%\TelemetryService (and the %LOCALAPPDATA% fallback).
 :: Use before sealing/cloning a master image or for QC cleanup. Safe to run
 :: when nothing is installed.
 ::
@@ -66,6 +66,7 @@ if %errorLevel% == 0 (
     set "TARGET_EXE=%INSTALL_EXE%"
     if not exist "%TARGET_EXE%" set "TARGET_EXE=%SOURCE_EXE%"
 
+    if exist "%DATA_DIR%\activated.marker" set "STATE_FOUND=1"
     if exist "%DATA_DIR%\activation_state.json" set "STATE_FOUND=1"
     if exist "%DATA_DIR%\logs" set "STATE_FOUND=1"
 
@@ -77,22 +78,28 @@ if %errorLevel% == 0 (
         echo [reset] agent executable not found; removing state directly
     )
 
-    echo [reset] removing leftover state, corrupt snapshots, and logs
+    echo [reset] removing leftover marker, debug state, corrupt snapshots, and logs
+    if exist "%DATA_DIR%\activated.marker" del /F /Q "%DATA_DIR%\activated.marker"
     if exist "%DATA_DIR%\activation_state.json" del /F /Q "%DATA_DIR%\activation_state.json"
     if exist "%DATA_DIR%\activation_state.json.corrupt.*" del /F /Q "%DATA_DIR%\activation_state.json.corrupt.*"
     if exist "%DATA_DIR%\logs" rmdir /S /Q "%DATA_DIR%\logs"
     if exist "%DATA_DIR%" rmdir "%DATA_DIR%" 2>nul
 
-    if exist "%FALLBACK_DATA_DIR%\activation_state.json" (
+    if exist "%FALLBACK_DATA_DIR%\activated.marker" (
         echo [reset] removing fallback state at %FALLBACK_DATA_DIR%
-        del /F /Q "%FALLBACK_DATA_DIR%\activation_state.json"
+        del /F /Q "%FALLBACK_DATA_DIR%\activated.marker"
     )
+    if exist "%FALLBACK_DATA_DIR%\activation_state.json" del /F /Q "%FALLBACK_DATA_DIR%\activation_state.json"
     if exist "%FALLBACK_DATA_DIR%\activation_state.json.corrupt.*" del /F /Q "%FALLBACK_DATA_DIR%\activation_state.json.corrupt.*"
     if exist "%FALLBACK_DATA_DIR%\logs" rmdir /S /Q "%FALLBACK_DATA_DIR%\logs"
     if exist "%FALLBACK_DATA_DIR%" rmdir "%FALLBACK_DATA_DIR%" 2>nul
 
     if not defined STATE_FOUND echo [reset] no local state or logs were present
 
+    if exist "%DATA_DIR%\activated.marker" (
+        echo [reset] failed to remove %DATA_DIR%\activated.marker
+        exit /B 1
+    )
     if exist "%DATA_DIR%\activation_state.json" (
         echo [reset] failed to remove %DATA_DIR%\activation_state.json
         exit /B 1

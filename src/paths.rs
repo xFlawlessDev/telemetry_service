@@ -3,6 +3,7 @@ use std::{env, path::PathBuf};
 #[derive(Debug, Clone)]
 pub struct AppPaths {
     pub data_dir: PathBuf,
+    pub marker_file: PathBuf,
     pub state_file: PathBuf,
     pub log_dir: PathBuf,
     pub log_file: PathBuf,
@@ -14,13 +15,13 @@ impl AppPaths {
         let data_dir = data_dir();
         let state_file = data_dir.join("activation_state.json");
         let log_dir = data_dir.join("logs");
-        let log_file = log_dir.join("activation.log");
 
         Self {
-            data_dir,
+            marker_file: data_dir.join("activated.marker"),
             state_file,
+            log_file: log_dir.join("activation.log"),
             log_dir,
-            log_file,
+            data_dir,
         }
     }
 }
