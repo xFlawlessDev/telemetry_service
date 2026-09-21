@@ -207,26 +207,41 @@ After activation succeeds, delete the installed executable and its folder. This 
 --reset-state
 ```
 
-Delete local activation state and logs. Use this before sealing or cloning a Windows image.
+Delete local activation state and logs. Use this before sealing or cloning a Windows image. Operator wrapper: `scripts\reset-state.cmd`, which also checks the startup task and legacy registry Run entries.
 
 ## Manufacturing Deploy
 
 Safe image rule: copy the binary into the image, but do not keep local state from the master image. Manufacturing networks should block `register.axiooworld.com` during production so activation cannot post before the device reaches the intended activation network.
 
+Operators use the scripts in `scripts` instead of typing CLI commands:
+
+```powershell
+.\scripts\install.cmd telemetry_service.exe
+.\scripts\install-postclone.cmd telemetry_service.exe
+.\scripts\test.cmd
+.\scripts\reset-state.cmd
+.\scripts\uninstall.cmd
+```
+
 For Audit/OOBE or post-clone setup:
 
 ```powershell
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --reset-state
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --install-startup
+.\scripts\install-postclone.cmd telemetry_service.exe
+```
+
+For QC payload checks (dry-run; no post, no state file):
+
+```powershell
+.\scripts\test.cmd
 ```
 
 For QC cleanup after a manual test run:
 
 ```powershell
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --remove-startup
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --reset-state
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --install-startup
+powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1 -Mode QcCleanup -SkipCopy
 ```
+
+`reset-state.cmd` checks the startup task and legacy registry Run entries, then removes state, corrupt snapshots, and logs. `uninstall.cmd /keepdata` removes the startup task and installed binary while keeping state/logs.
 
 Do not allow successful activation on the master image. Otherwise every clone can inherit activated local state.
 

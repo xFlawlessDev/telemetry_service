@@ -60,9 +60,9 @@ New-Item -ItemType Directory -Force "C:\Program Files\TelemetryService"
 Copy-Item "target\release\telemetry_service.exe" "C:\Program Files\TelemetryService\telemetry_service.exe" -Force
 ```
 
-## CLI Deploy
+## CLI Deploy (referensi)
 
-Semua command dijalankan dari binary final:
+Operator tidak perlu mengetik command ini. Semua langkah di guide ini memakai script di section **Script Deploy**. Command berikut hanya referensi perilaku binary:
 
 ```powershell
 & "C:\Program Files\TelemetryService\telemetry_service.exe" --reset-state
@@ -75,6 +75,28 @@ Command behavior:
 - `--reset-state`: hapus local activation state dan logs.
 - `--install-startup`: register Scheduled Task `TelemetryServiceActivation` yang jalan saat logon user mana pun, di session user tersebut. Wajib elevated karena logon-trigger task butuh hak administrator. Task diberi security descriptor yang mengizinkan `Authenticated Users` menghapus task, sehingga agent non-elevated bisa self-delete setelah aktivasi sukses tanpa UAC prompt. Folder install dan binary juga diberi hak delete-only untuk `BUILTIN\Users`, supaya agent bisa menghapus aplikasinya sendiri. Command ini juga menghapus legacy registry `Run` entry `TelemetryServiceActivation` di `HKLM` dan `HKCU`.
 - `--remove-startup`: hapus Scheduled Task `TelemetryServiceActivation`; task tidak ada dianggap sukses. Legacy registry `Run` entry ikut dihapus.
+
+## Script Deploy
+
+Semua langkah install dan cleanup di guide ini memakai script di folder `scripts`. Script `.cmd` otomatis meminta elevasi UAC, jadi operator tidak perlu mengetik command CLI satu per satu.
+
+| Script | Fungsi |
+| --- | --- |
+| `scripts\install.cmd [exe]` | Master User Mode: copy binary, remove startup task, reset state. |
+| `scripts\install-postclone.cmd [exe]` | Mesin final post-clone: copy binary jika ada sumber, reset state, install startup task. |
+| `scripts\test.cmd [exe]` | Dry-run payload: tidak post ke API dan tidak menulis state. |
+| `scripts\reset-state.cmd [exe]` | Cek Scheduled Task dan legacy registry Run entry, lalu reset state dan logs. |
+| `scripts\uninstall.cmd [/keepdata]` | Hapus startup task, state/logs, dan binary. `/keepdata` menyimpan state dan logs. |
+
+Contoh pemakaian:
+
+```powershell
+.\scripts\install.cmd telemetry_service.exe
+.\scripts\install-postclone.cmd telemetry_service.exe
+.\scripts\test.cmd
+.\scripts\reset-state.cmd
+.\scripts\uninstall.cmd
+```
 
 ## Auto Deploy Script
 
@@ -125,23 +147,21 @@ Risiko utama: Windows sudah login dan startup task bisa menjalankan agent sebelu
 
 ### Recommended Flow
 
-Di image master User Mode:
+Di image master User Mode, jalankan satu script (auto-elevate):
 
 ```powershell
-New-Item -ItemType Directory -Force "C:\Program Files\TelemetryService"
-Copy-Item "telemetry_service.exe" "C:\Program Files\TelemetryService\telemetry_service.exe" -Force
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --remove-startup
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --reset-state
+.\scripts\install.cmd telemetry_service.exe
 ```
 
-Jangan install startup task aktif di master sebelum clone, kecuali yakin agent tidak akan jalan.
+Script ini copy binary ke `C:\Program Files\TelemetryService`, remove startup task, dan reset state. Jangan install startup task aktif di master sebelum clone, kecuali yakin agent tidak akan jalan.
 
-Setelah clone masuk mesin final, jalankan first-boot/post-clone script:
+Setelah clone masuk mesin final, jalankan script post-clone:
 
 ```powershell
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --reset-state
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --install-startup
+.\scripts\install-postclone.cmd telemetry_service.exe
 ```
+
+Jika binary sudah ada di `C:\Program Files\TelemetryService` dan tidak ada sumber exe di folder script, script tetap jalan memakai binary terpasang, reset state, lalu install startup task.
 
 Saat user pertama login, Scheduled Task menjalankan agent. Agent akan:
 
@@ -155,31 +175,31 @@ Saat user pertama login, Scheduled Task menjalankan agent. Agent akan:
 
 ### QC Test Di Master User Mode
 
-Jika operator harus test agent di master:
+Jika operator harus test agent di master, jalankan dry-run lewat script (tidak post ke API dan tidak menulis state):
 
 ```powershell
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --once --print-payload
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --remove-startup
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --reset-state
+.\scripts\test.cmd
+.\scripts\reset-state.cmd
 ```
 
-Setelah itu baru clone. Jangan skip `--reset-state`.
+`reset-state.cmd` mengecek status startup task dan legacy Run entry, lalu memastikan state dan logs bersih. Setelah itu baru clone.
 
 ### Pre-Clone Checklist
 
 Run sebelum capture/clone:
 
 ```powershell
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --remove-startup
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --reset-state
-Test-Path "C:\ProgramData\TelemetryService\activation_state.json"
+.\scripts\reset-state.cmd
 ```
 
 Expected result:
 
 ```text
-False
+[reset] startup task not found: TelemetryServiceActivation
+[reset] done; local activation state is clear
 ```
+
+Jika script melaporkan startup task masih ada, atau state/logs gagal dihapus (exit code bukan 0), jangan capture/clone image.
 
 ## Workflow 2 — OOBE Mode Dengan QC Di Audit Mode
 
@@ -187,19 +207,13 @@ Ini workflow paling aman untuk manufaktur. Audit Mode dipakai untuk install bina
 
 ### Recommended Flow In Audit Mode
 
-Install binary:
+Prepare binary, state bersih, dan startup task dengan satu script dari elevated PowerShell:
 
 ```powershell
-New-Item -ItemType Directory -Force "C:\Program Files\TelemetryService"
-Copy-Item "telemetry_service.exe" "C:\Program Files\TelemetryService\telemetry_service.exe" -Force
+powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1 -Mode AuditOobe -SourceExe .\telemetry_service.exe
 ```
 
-Jika QC tidak perlu menjalankan activation agent, langsung prepare startup task:
-
-```powershell
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --reset-state
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --install-startup
-```
+Mode `AuditOobe` copy binary ke Program Files, reset state, lalu install startup task. Alternatif lain: `.\scripts\install-postclone.cmd telemetry_service.exe`.
 
 Lalu seal ke OOBE:
 
@@ -211,19 +225,19 @@ Saat user pertama login setelah OOBE, Scheduled Task menjalankan agent dan aktiv
 
 ### QC Test Di Audit Mode
 
-Jika QC perlu memastikan payload, WMI, lokasi, dan HTTP classification berjalan:
+Jika QC perlu memastikan payload, WMI, lokasi, dan HTTP classification berjalan tanpa post ke API:
 
 ```powershell
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --once --print-payload
+.\scripts\test.cmd
 ```
 
-Setelah QC selesai, reset state lalu install ulang startup task:
+Setelah QC selesai, bersihkan state dan install ulang startup task dengan satu script:
 
 ```powershell
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --remove-startup
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --reset-state
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --install-startup
+powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1 -Mode QcCleanup -SkipCopy
 ```
+
+Mode `QcCleanup` remove startup task, reset state, lalu install startup task kembali. Tanpa `-SkipCopy`, script juga menyalin binary dari `-SourceExe`.
 
 Baru seal:
 
@@ -292,14 +306,16 @@ icacls "C:\Program Files\TelemetryService"
 
 ### Residual Task Setelah Aktivasi
 
-Jika self-delete task gagal (misal ACL task diubah policy), task yang tersisa hanya membuat agent jalan ~50ms lalu exit di setiap login berikutnya (`activated = true`). State tetap di `%ProgramData%`, jadi user baru tidak mengulang aktivasi, dan helper app-removal akan dicoba lagi saat itu. Jalankan `--remove-startup` dari elevated session untuk membersihkan manual.
+Jika self-delete task gagal (misal ACL task diubah policy), task yang tersisa hanya membuat agent jalan ~50ms lalu exit di setiap login berikutnya (`activated = true`). State tetap di `%ProgramData%`, jadi user baru tidak mengulang aktivasi, dan helper app-removal akan dicoba lagi saat itu. Jalankan `.\scripts\reset-state.cmd` (cek task + reset state) atau `.\scripts\uninstall.cmd /keepdata` dari elevated session untuk membersihkan manual.
 
-Untuk unit yang di-refurbish/QC ulang, jalankan:
+Untuk unit yang di-refurbish/QC ulang, siapkan ulang dari source binary v0.3.0:
 
 ```powershell
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --remove-startup
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --reset-state
+.\scripts\install.cmd telemetry_service.exe
+.\scripts\install-postclone.cmd
 ```
+
+`install.cmd` mengembalikan binary ke Program Files, remove startup task, dan reset state. Setelah QC selesai, `install-postclone.cmd` memasang startup task kembali.
 
 ## Troubleshooting
 
@@ -309,11 +325,13 @@ Check startup task:
 schtasks /Query /TN "TelemetryServiceActivation" /V /FO LIST
 ```
 
-Run once manually:
+Run once manually (dry-run, tidak post):
 
 ```powershell
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --once --print-payload
+.\scripts\test.cmd
 ```
+
+Untuk benar-benar post satu kali ke API, gunakan `.\scripts\post-once.cmd` (bisa menulis state jika sukses).
 
 Check state:
 
@@ -327,23 +345,31 @@ Check logs:
 Get-Content "C:\ProgramData\TelemetryService\logs\activation.log"
 ```
 
-Reset local activation data:
+Reset local activation data (sekaligus cek startup task dan legacy Run entry):
 
 ```powershell
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --reset-state
+.\scripts\reset-state.cmd
 ```
 
 Reinstall startup task:
 
 ```powershell
-& "C:\Program Files\TelemetryService\telemetry_service.exe" --install-startup
+.\scripts\install-postclone.cmd
+```
+
+Uninstall total (startup task + state + binary):
+
+```powershell
+.\scripts\uninstall.cmd
 ```
 
 ## Operator Rules
 
+- Jalankan script di folder `scripts`; operator tidak perlu mengetik command CLI manual.
+- QC payload pakai `.\scripts\test.cmd` (dry-run). Jangan pakai `--once` untuk QC karena ikut post ke API.
 - Jangan clone image setelah agent berhasil aktivasi.
 - Jangan clone image yang punya `activation_state.json`.
-- Setelah test manual di master/Audit Mode, selalu run `--reset-state`.
+- Setelah test manual di master/Audit Mode, selalu run `.\scripts\reset-state.cmd`.
 - Untuk User Mode clone, install startup task aktif sebaiknya dilakukan post-clone.
 - Untuk OOBE/Audit Mode, install startup task sebelum `sysprep /oobe /shutdown` aman selama state sudah di-reset.
 - Binary ikut terhapus setelah aktivasi sukses (one-way). Pastikan unit sudah tidak butuh QC/refurb sebelum aktivasi berjalan, atau simpan salinan binary untuk QC ulang.
