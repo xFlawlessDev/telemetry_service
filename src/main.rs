@@ -200,8 +200,7 @@ async fn wait_until_outside_block_zone(config: &AppConfig) -> bool {
             BlockDecision::Clear => return false,
             BlockDecision::Blocked => {
                 info!(
-                    latitude = ?location.latitude,
-                    longitude = ?location.longitude,
+                    has_coordinates = location.latitude.is_some() && location.longitude.is_some(),
                     radius_meters = zone.radius_meters,
                     "inside block zone; activation POST suppressed"
                 );

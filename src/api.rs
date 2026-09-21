@@ -132,11 +132,13 @@ fn form_text_value(value: Option<f64>) -> String {
 #[must_use]
 pub fn payload_debug_string(device: &DeviceRegistration) -> String {
     format!(
-        "serial_number={} latitude={} longitude={} accuracy_meters={}",
+        "serial_number={} coordinates={}",
         device.serial_number,
-        form_text_value(device.latitude),
-        form_text_value(device.longitude),
-        form_text_value(device.accuracy_meters)
+        if device.latitude.is_some() && device.longitude.is_some() {
+            "present"
+        } else {
+            "null"
+        }
     )
 }
 
@@ -429,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn payload_debug_string_should_include_serial_number_and_coordinates() {
+    fn payload_debug_string_should_include_serial_number_without_coordinates() {
         let device = DeviceRegistration {
             serial_number: "0223290070363009024".to_owned(),
             latitude: Some(-6.914744),
@@ -442,7 +444,10 @@ mod tests {
             payload.contains("serial_number=0223290070363009024"),
             "payload: {payload}"
         );
-        assert!(payload.contains("latitude=-6.914744"), "payload: {payload}");
-        assert!(payload.contains("accuracy_meters=10"), "payload: {payload}");
+        assert!(payload.contains("coordinates=present"), "payload: {payload}");
+        assert!(
+            !payload.contains("latitude") && !payload.contains("longitude"),
+            "payload: {payload}"
+        );
     }
 }
