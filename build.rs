@@ -1,5 +1,9 @@
 use std::{env, fs, path::Path};
 
+const APP_NAME: &str = "Axioo Telemetry Service";
+const EXE_NAME: &str = "telemetry_service.exe";
+const COPYRIGHT: &str = "Copyright © Axioo Indonesia";
+
 const KEYS: &[&str] = &[
     "TELEMETRY_BASE_URL",
     "TELEMETRY_API_KEY",
@@ -18,8 +22,13 @@ fn main() {
     {
         winresource::WindowsResource::new()
             .set_icon("assets/icon.ico")
+            .set("FileDescription", APP_NAME)
+            .set("ProductName", APP_NAME)
+            .set("InternalName", APP_NAME)
+            .set("OriginalFilename", EXE_NAME)
+            .set("LegalCopyright", COPYRIGHT)
             .compile()
-            .expect("failed to embed Windows executable icon");
+            .expect("failed to embed Windows executable resources");
     }
 
     if let Ok(contents) = fs::read_to_string(Path::new(".env")) {
