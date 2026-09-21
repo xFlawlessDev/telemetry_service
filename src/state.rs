@@ -7,7 +7,11 @@ use uuid::Uuid;
 
 use crate::error::{AppError, AppResult, io_error};
 
-pub const ACTIVATED_MARKER: &str = "activated";
+/// Namespace used to derive a deterministic, stable install id from the
+/// hardware serial number when durable state is disabled. This keeps the
+/// activation request idempotent across retries and logons without writing
+/// any local file.
+const INSTALL_ID_NAMESPACE: Uuid = Uuid::from_u128(0x6f9a1c4e_2b7d_4f0a_9c31_5d8e2a6b7c10);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivationState {
@@ -46,15 +50,12 @@ impl ActivationState {
     }
 }
 
-pub async fn is_activated_marker(path: &Path) -> bool {
-    fs::try_exists(path).await.unwrap_or(false)
-}
-
-pub async fn mark_activated_marker(path: &Path) -> AppResult<()> {
-    create_parent_dir(path).await?;
-    fs::write(path, ACTIVATED_MARKER)
-        .await
-        .map_err(|source| io_error(path, source))
+/// Derive a stable install id from the hardware serial number. The same device
+/// always produces the same id, so retries reuse one server-side idempotency
+/// key without persisting anything locally.
+#[must_use]
+pub fn derive_install_id(serial_number: &str) -> Uuid {
+    Uuid::new_v5(&INSTALL_ID_NAMESPACE, serial_number.as_bytes())
 }
 
 pub async fn load_existing_or_new_state(path: &Path) -> AppResult<ActivationState> {
@@ -179,21 +180,19 @@ mod tests {
         }));
     }
 
-    #[tokio::test]
-    async fn is_activated_marker_should_be_false_when_marker_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("activated.marker");
-
-        assert!(!is_activated_marker(&path).await);
+    #[test]
+    fn derive_install_id_should_be_stable_for_same_serial() {
+        assert_eq!(
+            derive_install_id("0223290070363009024"),
+            derive_install_id("0223290070363009024")
+        );
     }
 
-    #[tokio::test]
-    async fn mark_activated_marker_should_create_marker() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("activated.marker");
-
-        mark_activated_marker(&path).await.unwrap();
-
-        assert!(is_activated_marker(&path).await);
+    #[test]
+    fn derive_install_id_should_differ_for_different_serials() {
+        assert_ne!(
+            derive_install_id("0223290070363009024"),
+            derive_install_id("0223290070363009025")
+        );
     }
 }

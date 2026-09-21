@@ -5,15 +5,14 @@ Windows activation background agent written in Rust.
 ## Behavior
 
 - Starts automatically at user logon via a self-deleting Scheduled Task.
-- Checks for a local completion marker; no install id, timestamps, or logs are stored in production mode.
+- Writes no local files in production mode; no install id, state, timestamps, or logs.
 - Collects hardware serial number.
 - Collects optional Windows geolocation coordinates.
 - Optionally suppresses all POSTs while the device is inside a configured coordinate block zone.
 - Posts activation payload to `https://register.axiooworld.com/axioo_on/create`.
 - Retries retryable network/server failures with exponential backoff and jitter.
-- Writes a completion marker after server success.
-- Removes its startup task after successful activation.
-- When launched by the scheduled task (`--self-delete-on-success`), also deletes its installed executable and folder.
+- Removes its startup task after successful activation; the task's `--self-delete-on-success` action then removes the binary and folder.
+- Uses a deterministic install id derived from the hardware serial number so retries are idempotent without persisting state.
 - Manual runs (`--once`, `--dry-run`, or without the flag) never delete the binary.
 - Optional build-time debug mode (`TELEMETRY_DEBUG=1`) keeps JSON state and log files for troubleshooting.
 
@@ -22,14 +21,14 @@ Windows activation background agent written in Rust.
 
 Startup flow:
 
-1. Discover the data directory, marker, state, and log paths.
-2. If the completion marker exists (or debug JSON state has `activated = true`), remove the startup task and exit.
+1. Discover the data directory, state, and log paths (used only in debug mode).
+2. If debug JSON state exists with `activated = true`, remove the startup task and exit.
 3. Collect hardware serial number.
 4. Collect optional Windows geolocation with timeout.
 5. If a block zone is configured and the device is inside it, sleep and re-check without posting.
 6. Build activation payload.
 7. `POST` payload to `https://register.axiooworld.com/axioo_on/create`.
-8. On API success (`result = 0`), write state, remove the startup task, and exit.
+8. On API success (`result = 0`), remove the startup task and exit. In debug mode, write state first.
 9. On retryable failure, sleep with backoff, then retry.
 10. On fatal failure, exit with error.
 
@@ -49,7 +48,7 @@ Fatal failures:
 - API business reject (`result = -1`), e.g. invalid/expired token, empty serial number, database save failure
 - unexpected non-retryable client errors
 
-Backoff starts at 15 seconds, caps at 15 minutes, and applies ±20% jitter. Default mode retries forever because startup activation must survive offline boot. `--once` changes retryable failure behavior to exit after one attempt without writing the marker.
+Backoff starts at 15 seconds, caps at 15 minutes, and applies ±20% jitter. Default mode retries forever because startup activation must survive offline boot. `--once` changes retryable failure behavior to exit after one attempt without writing state.
 
 ## Activation Request
 
@@ -67,7 +66,7 @@ Content-Type: multipart/form-data
 Idempotency-Key: {install_id}
 ```
 
-`Idempotency-Key` uses the in-memory or persisted `install_id`, so duplicate create attempts are safe when the server implements idempotency. If no state file exists yet, the id becomes durable only after successful activation.
+`Idempotency-Key` is a deterministic install id derived from the hardware serial number (UUID v5), so duplicate create attempts are safe when the server implements idempotency. The same device always sends the same key, and nothing is persisted locally. In debug mode the key is a random `install_id` that is stored in the JSON state after successful activation.
 
 Payload fields:
 
@@ -91,35 +90,21 @@ Success response:
 }
 ```
 
-Only HTTP `200 OK` with JSON `result = 0` writes the activated marker. Other `200 OK` responses are treated as failed activation and use `message` as the server reason.
+Only HTTP `200 OK` with JSON `result = 0` counts as successful activation. Other `200 OK` responses are treated as failed activation and use `message` as the server reason.
 
 ## Local State
 
-Production mode (default) keeps a single completion marker:
-
-```text
-%ProgramData%\TelemetryService\activated.marker
-```
-
-Fallback when `%ProgramData%` is unavailable:
-
-```text
-%LOCALAPPDATA%\TelemetryService\activated.marker
-```
-
-If both are unavailable, the agent uses `./TelemetryService/activated.marker`.
-
-The marker is created only after the create endpoint returns success. Blocked domains, offline manufacturing networks, retryable failures, and fatal server responses do not create local state.
+Production mode (default) writes **no local files at all**. Completion is not tracked on disk; instead the install id is derived deterministically from the hardware serial number (UUID v5), so retries reuse the same server-side `Idempotency-Key` and the agent stops re-activating only because the startup task and binary delete themselves after success. Blocked domains, offline manufacturing networks, retryable failures, and fatal server responses leave nothing behind.
 
 ### Debug State
 
-With `TELEMETRY_DEBUG=1`, the agent instead keeps a richer JSON state file for troubleshooting:
+With `TELEMETRY_DEBUG=1`, the agent keeps a durable JSON state file for troubleshooting:
 
 ```text
 %ProgramData%\TelemetryService\activation_state.json
 ```
 
-It records `install_id`, `activated`, `activation_id`, `attempt_count`, and timestamps. Corrupt JSON is renamed to `activation_state.json.corrupt.<timestamp>`. In this mode the `activated.marker` is not written; the `activated` flag replaces it.
+It records a random `install_id`, `activated`, `activation_id`, `attempt_count`, and timestamps, and is used to skip activation when `activated = true`. Corrupt JSON is renamed to `activation_state.json.corrupt.<timestamp>`.
 
 ## Logs
 
@@ -175,7 +160,7 @@ Other runtime defaults live in `src/config.rs`:
 --once
 ```
 
-Run one activation attempt, then exit on retryable failure without writing the marker.
+Run one activation attempt, then exit on retryable failure without writing state.
 
 ```text
 --print-payload
@@ -211,7 +196,7 @@ After activation succeeds, delete the installed executable and its folder. This 
 --reset-state
 ```
 
-Delete the local completion marker, debug JSON state, and debug logs. Use this before sealing or cloning a Windows image. Operator wrapper: `scripts\reset-state.cmd`, which also checks the startup task and legacy registry Run entries.
+Delete any debug JSON state and logs. Use this before sealing or cloning a Windows image. Operator wrapper: `scripts\reset-state.cmd`, which also checks the startup task and legacy registry Run entries.
 
 ## Manufacturing Deploy
 
@@ -245,9 +230,9 @@ For QC cleanup after a manual test run:
 powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1 -Mode QcCleanup -SkipCopy
 ```
 
-`reset-state.cmd` checks the startup task and legacy registry Run entries, then removes the marker, debug state, corrupt snapshots, and logs. `uninstall.cmd /keepdata` removes the startup task and installed binary while keeping local state.
+`reset-state.cmd` checks the startup task and legacy registry Run entries, then removes local state, corrupt snapshots, and logs. `uninstall.cmd /keepdata` removes the startup task and installed binary while keeping local state.
 
-Do not allow successful activation on the master image. Otherwise every clone can inherit the completion marker.
+Do not allow successful activation on the master image. Otherwise the server may already have the device registered.
 
 
 Auto deploy script:

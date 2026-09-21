@@ -109,20 +109,7 @@ async fn run_cli_command(
 }
 
 async fn reset_local_state(paths: &AppPaths) -> AppResult<()> {
-    remove_file_if_exists(&paths.marker_file).await?;
-    remove_file_if_exists(&paths.state_file).await?;
-    remove_dir_if_exists(&paths.log_dir).await
-}
-
-async fn remove_file_if_exists(path: &Path) -> AppResult<()> {
-    match fs::remove_file(path).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(source) => Err(AppError::Io {
-            path: path.to_path_buf(),
-            source,
-        }),
-    }
+    remove_dir_if_exists(&paths.data_dir).await
 }
 
 async fn remove_dir_if_exists(path: &Path) -> AppResult<()> {
@@ -148,29 +135,21 @@ async fn run(config: AppConfig, paths: AppPaths, options: RuntimeOptions) -> App
     if DEBUG {
         run_with_state(config, paths, options).await
     } else {
-        run_stateless(config, paths, options).await
+        run_stateless(config, options).await
     }
 }
 
-/// Production path: no durable JSON state, no attempt counters. Completion is
-/// tracked only by the `activated.marker` file so a machine never re-activates.
-async fn run_stateless(
-    config: AppConfig,
-    paths: AppPaths,
-    options: RuntimeOptions,
-) -> AppResult<()> {
-    if state::is_activated_marker(&paths.marker_file).await {
-        info!(marker = %paths.marker_file.display(), "already activated; skipping");
-        cleanup_autostart(&config).await?;
-        schedule_app_removal_if_requested(options);
-        return Ok(());
-    }
-
+/// Production path: writes no local files at all. The installation is removed
+/// after success and logs are disabled, so `--self-delete-on-success` leaves
+/// the machine clean. The install id is derived from the hardware serial
+/// number, keeping the activation request idempotent across retries.
+async fn run_stateless(config: AppConfig, options: RuntimeOptions) -> AppResult<()> {
     let device = collect_device_registration(&config).await?;
     if options.print_payload {
         println!("{}", payload_debug_string(&device));
     }
 
+    let install_id = state::derive_install_id(&device.serial_number);
     let client = ActivationClient::new(&config)?;
     let mut attempt_count: u64 = 0;
 
@@ -180,10 +159,9 @@ async fn run_stateless(
         }
 
         attempt_count = attempt_count.saturating_add(1);
-        match client.activate(uuid::Uuid::new_v4(), &device).await {
+        match client.activate(install_id, &device).await {
             Ok(_) => {
-                state::mark_activated_marker(&paths.marker_file).await?;
-                info!(marker = %paths.marker_file.display(), "registration succeeded");
+                info!(%install_id, "registration succeeded");
                 cleanup_autostart(&config).await?;
                 schedule_app_removal_if_requested(options);
                 return Ok(());
