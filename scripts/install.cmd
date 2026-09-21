@@ -5,7 +5,7 @@
 ::   install.cmd [path\to\telemetry_service.exe]
 ::
 :: Default source: telemetry_service.exe next to this script.
-:: Copies the binary to Program Files, removes the startup entry, and resets
+:: Copies the binary to Program Files, removes the startup task, and resets
 :: activation state/logs. Safe to run before cloning the master image.
 
 :: Check for administrative privileges
@@ -57,7 +57,7 @@ if %errorLevel% == 0 (
         exit /B 1
     )
 
-    echo [install] master prepared; do not install startup entry until post-clone
+    echo [install] master prepared; do not install startup task until post-clone
     echo [install] done
     pause
     exit /B 0

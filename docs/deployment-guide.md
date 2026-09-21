@@ -73,8 +73,8 @@ Semua command dijalankan dari binary final:
 Command behavior:
 
 - `--reset-state`: hapus local activation state dan logs.
-- `--install-startup`: register registry `Run` startup entry untuk path `.exe` saat ini. Saat run elevated, entry ditulis ke `HKLM` (semua user); tanpa elevation fallback ke `HKCU` (user saat ini saja). Command ini juga menghapus legacy Scheduled Task `TelemetryServiceActivation` bila masih ada.
-- `--remove-startup`: hapus startup entry; entry tidak ada dianggap sukses. Legacy Scheduled Task ikut dihapus bila ada.
+- `--install-startup`: register Scheduled Task `TelemetryServiceActivation` yang jalan saat logon user mana pun, di session user tersebut. Wajib elevated karena logon-trigger task butuh hak administrator. Task diberi security descriptor yang mengizinkan `Authenticated Users` menghapus task, sehingga agent non-elevated bisa self-delete setelah aktivasi sukses tanpa UAC prompt. Command ini juga menghapus legacy registry `Run` entry `TelemetryServiceActivation` di `HKLM` dan `HKCU`.
+- `--remove-startup`: hapus Scheduled Task `TelemetryServiceActivation`; task tidak ada dianggap sukses. Legacy registry `Run` entry ikut dihapus.
 
 ## Auto Deploy Script
 
@@ -86,12 +86,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1 -Mode AuditOobe
 
 Mode yang tersedia:
 
-- `UserModeMaster`: copy binary, remove startup entry, reset state; aman untuk master sebelum clone.
-- `PostClone`: copy binary, reset state, install startup entry; dipakai di mesin final hasil clone.
-- `AuditOobe`: copy binary, reset state, install startup entry; dipakai di Audit Mode sebelum `sysprep /oobe /shutdown`.
-- `QcCleanup`: copy binary, remove startup entry, reset state, install startup entry; dipakai setelah QC test.
-- `InstallOnly`: copy binary dan install startup entry.
-- `RemoveOnly`: remove startup entry saja.
+- `UserModeMaster`: copy binary, remove startup task, reset state; aman untuk master sebelum clone.
+- `PostClone`: copy binary, reset state, install startup task; dipakai di mesin final hasil clone.
+- `AuditOobe`: copy binary, reset state, install startup task; dipakai di Audit Mode sebelum `sysprep /oobe /shutdown`.
+- `QcCleanup`: copy binary, remove startup task, reset state, install startup task; dipakai setelah QC test.
+- `InstallOnly`: copy binary dan install startup task.
+- `RemoveOnly`: remove startup task saja.
 
 Parameter umum:
 
@@ -121,7 +121,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1 -Mode AuditOobe -S
 
 ## Workflow 1 — User Mode Siap Pakai Lalu Clone
 
-Risiko utama: Windows sudah login dan startup entry bisa menjalankan agent sebelum image dikloning. Kalau agent sempat run di master, state akan dibuat di master.
+Risiko utama: Windows sudah login dan startup task bisa menjalankan agent sebelum image dikloning. Kalau agent sempat run di master, state akan dibuat di master.
 
 ### Recommended Flow
 
@@ -134,7 +134,7 @@ Copy-Item "telemetry_service.exe" "C:\Program Files\TelemetryService\telemetry_s
 & "C:\Program Files\TelemetryService\telemetry_service.exe" --reset-state
 ```
 
-Jangan install startup entry aktif di master sebelum clone, kecuali yakin agent tidak akan jalan.
+Jangan install startup task aktif di master sebelum clone, kecuali yakin agent tidak akan jalan.
 
 Setelah clone masuk mesin final, jalankan first-boot/post-clone script:
 
@@ -143,14 +143,14 @@ Setelah clone masuk mesin final, jalankan first-boot/post-clone script:
 & "C:\Program Files\TelemetryService\telemetry_service.exe" --install-startup
 ```
 
-Saat user pertama login, registry `Run` key menjalankan agent. Agent akan:
+Saat user pertama login, Scheduled Task menjalankan agent. Agent akan:
 
 1. membuat state baru di memory;
 2. collect hardware dan lokasi;
 3. kirim aktivasi;
 4. retry jika offline/server belum tersedia tanpa menulis local state;
 5. buat `activation_state.json` hanya setelah API sukses (`result = 0`);
-6. hapus startup entry;
+6. hapus startup task;
 7. exit.
 
 ### QC Test Di Master User Mode
@@ -194,7 +194,7 @@ New-Item -ItemType Directory -Force "C:\Program Files\TelemetryService"
 Copy-Item "telemetry_service.exe" "C:\Program Files\TelemetryService\telemetry_service.exe" -Force
 ```
 
-Jika QC tidak perlu menjalankan activation agent, langsung prepare startup entry:
+Jika QC tidak perlu menjalankan activation agent, langsung prepare startup task:
 
 ```powershell
 & "C:\Program Files\TelemetryService\telemetry_service.exe" --reset-state
@@ -207,7 +207,7 @@ Lalu seal ke OOBE:
 sysprep /oobe /shutdown
 ```
 
-Saat user pertama login setelah OOBE, registry `Run` key menjalankan agent dan aktivasi dimulai.
+Saat user pertama login setelah OOBE, Scheduled Task menjalankan agent dan aktivasi dimulai.
 
 ### QC Test Di Audit Mode
 
@@ -217,7 +217,7 @@ Jika QC perlu memastikan payload, WMI, lokasi, dan HTTP classification berjalan:
 & "C:\Program Files\TelemetryService\telemetry_service.exe" --once --print-payload
 ```
 
-Setelah QC selesai, reset state lalu install ulang startup entry:
+Setelah QC selesai, reset state lalu install ulang startup task:
 
 ```powershell
 & "C:\Program Files\TelemetryService\telemetry_service.exe" --remove-startup
@@ -236,7 +236,7 @@ sysprep /oobe /shutdown
 ```powershell
 Test-Path "C:\Program Files\TelemetryService\telemetry_service.exe"
 Test-Path "C:\ProgramData\TelemetryService\activation_state.json"
-Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" | Select-Object TelemetryServiceActivation
+schtasks /Query /TN "TelemetryServiceActivation"
 ```
 
 Expected:
@@ -244,27 +244,32 @@ Expected:
 ```text
 True
 False
-Startup entry exists
+Task exists
 ```
 
-## Run Key: HKLM vs HKCU
+## Scheduled Task dan Self-Delete Tanpa Admin
 
-Default CLI `--install-startup` menulis ke `HKLM\...\Run` saat dijalankan elevated (semua user, wajib untuk first-login setelah OOBE). Tanpa elevation, entry otomatis fallback ke `HKCU` (hanya user yang menjalankan install).
+`--install-startup` (elevated) mendaftarkan Scheduled Task `TelemetryServiceActivation` dengan:
 
-Use `HKLM` (default elevated) when:
+- logon trigger untuk user mana pun;
+- principal `BUILTIN\Users` (`S-1-5-32-545`) dengan interactive-token logon type, sehingga task jalan di session user yang login;
+- security descriptor yang memberi `Authenticated Users` hak read/execute plus `DELETE` pada task.
 
-- aktivasi harus berjalan untuk user pertama setelah OOBE/clone;
-- deploy script sudah berjalan elevated (Audit Mode, post-clone admin).
+Karena ada hak `DELETE`, agent yang jalan non-elevated bisa menghapus task-nya sendiri setelah aktivasi sukses. Tidak ada UAC prompt dan tidak ada startup entry yang tertinggal. Task tidak auto-delete sebelum aktivasi sukses, jadi retry lintas reboot tetap aman.
 
-`HKCU` fallback hanya cocok untuk test di mesin developer, karena entry tidak akan berpindah ke user lain.
+Install wajib elevated karena logon-trigger task bersifat privileged; agent runtime sendiri selalu non-elevated.
 
-### Residual Entry Setelah Aktivasi
+Verify task dan security descriptor-nya:
 
-Agent berjalan non-elevated di session user, jadi penghapusan entry `HKLM` mungkin gagal setelah aktivasi sukses (butuh admin). Ini bukan masalah:
+```powershell
+schtasks /Query /TN "TelemetryServiceActivation" /V /FO LIST
+$svc = New-Object -ComObject Schedule.Service; $svc.Connect()
+$svc.GetFolder('\').GetTask('TelemetryServiceActivation').GetSecurityDescriptor(0xF)
+```
 
-- entry yang tersisa hanya membuat agent jalan ~50ms lalu exit di setiap login berikutnya (`activated = true`);
-- state tetap di `%ProgramData%`, jadi user baru tidak mengulang aktivasi;
-- entry bersih sendiri saat ada admin login, atau jalankan `--remove-startup` dari elevated session.
+### Residual Task Setelah Aktivasi
+
+Jika karena suatu hal self-delete gagal (misal ACL task diubah policy), task yang tersisa hanya membuat agent jalan ~50ms lalu exit di setiap login berikutnya (`activated = true`). State tetap di `%ProgramData%`, jadi user baru tidak mengulang aktivasi. Jalankan `--remove-startup` dari elevated session untuk membersihkan manual.
 
 Untuk unit yang di-refurbish/QC ulang, jalankan:
 
@@ -275,10 +280,10 @@ Untuk unit yang di-refurbish/QC ulang, jalankan:
 
 ## Troubleshooting
 
-Check startup entry:
+Check startup task:
 
 ```powershell
-Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" | Select-Object TelemetryServiceActivation
+schtasks /Query /TN "TelemetryServiceActivation" /V /FO LIST
 ```
 
 Run once manually:
@@ -305,7 +310,7 @@ Reset local activation data:
 & "C:\Program Files\TelemetryService\telemetry_service.exe" --reset-state
 ```
 
-Reinstall startup entry:
+Reinstall startup task:
 
 ```powershell
 & "C:\Program Files\TelemetryService\telemetry_service.exe" --install-startup
@@ -316,6 +321,6 @@ Reinstall startup entry:
 - Jangan clone image setelah agent berhasil aktivasi.
 - Jangan clone image yang punya `activation_state.json`.
 - Setelah test manual di master/Audit Mode, selalu run `--reset-state`.
-- Untuk User Mode clone, install startup entry aktif sebaiknya dilakukan post-clone.
-- Untuk OOBE/Audit Mode, install startup entry sebelum `sysprep /oobe /shutdown` aman selama state sudah di-reset.
+- Untuk User Mode clone, install startup task aktif sebaiknya dilakukan post-clone.
+- Untuk OOBE/Audit Mode, install startup task sebelum `sysprep /oobe /shutdown` aman selama state sudah di-reset.
 - Jangan kirim `.env` ke unit produksi; hanya `.exe` yang dibutuhkan.

@@ -1,12 +1,13 @@
 @echo off
-:: Telemetry Service - full uninstall (startup entry + state + installed files)
+:: Telemetry Service - full uninstall (startup task + state + installed files)
 ::
 :: Usage:
 ::   uninstall.cmd [/keepdata]
 ::
-:: Removes the registry Run startup entry (HKLM + HKCU + StartupApproved),
-:: the legacy scheduled task, activation state/logs in ProgramData, and the
-:: installed directory in Program Files. Safe to run when nothing is installed.
+:: Removes the self-deleting Scheduled Task startup entry, any legacy registry
+:: Run entries (HKLM + HKCU + StartupApproved) from older versions, activation
+:: state/logs in ProgramData, and the installed directory in Program Files.
+:: Safe to run when nothing is installed.
 :: /keepdata keeps activation state and logs in %ProgramData%\TelemetryService.
 ::
 :: ENTRY_NAME must match TELEMETRY_TASK_NAME if the binary was built with it.
@@ -44,7 +45,7 @@ if %errorLevel% == 0 (
     taskkill /IM telemetry_service.exe /F >nul 2>&1
 
     if exist "%INSTALL_EXE%" (
-        echo [uninstall] unregistering startup entry via agent
+        echo [uninstall] unregistering startup task via agent
         "%INSTALL_EXE%" --remove-startup
         if errorlevel 1 echo [uninstall] --remove-startup reported an error; continuing with registry cleanup
 
@@ -57,13 +58,13 @@ if %errorLevel% == 0 (
         echo [uninstall] installed executable not found: %INSTALL_EXE%
     )
 
-    echo [uninstall] removing startup registry entries
+    echo [uninstall] removing startup registry entries (legacy)
     reg delete "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" /v "%ENTRY_NAME%" /f >nul 2>&1
     reg delete "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" /v "%ENTRY_NAME%" /f >nul 2>&1
     reg delete "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" /v "%ENTRY_NAME%" /f >nul 2>&1
     reg delete "HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" /v "%ENTRY_NAME%" /f >nul 2>&1
 
-    echo [uninstall] removing legacy scheduled task
+    echo [uninstall] removing scheduled task
     schtasks /Delete /TN "%ENTRY_NAME%" /F >nul 2>&1
 
     if defined KEEP_DATA (

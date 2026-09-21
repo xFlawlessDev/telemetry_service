@@ -89,12 +89,12 @@ async fn run_cli_command(
                 path: "current executable".into(),
                 source,
             })?;
-            autostart::install_autostart(config.task_name, &executable).await?;
-            println!("installed startup entry `{}`", config.task_name);
+            autostart::install_autostart(config.task_name, &executable)?;
+            println!("installed startup task `{}`", config.task_name);
         }
         CliCommand::RemoveStartup => {
-            autostart::disable_autostart(config.task_name).await?;
-            println!("removed startup entry `{}`", config.task_name);
+            autostart::disable_autostart(config.task_name)?;
+            println!("removed startup task `{}`", config.task_name);
         }
         CliCommand::ResetState => {
             reset_local_state(paths).await?;
@@ -240,7 +240,7 @@ async fn collect_device_registration(config: &AppConfig) -> AppResult<DeviceRegi
 }
 
 async fn cleanup_autostart(config: &AppConfig) -> AppResult<()> {
-    match autostart::disable_autostart(config.task_name).await {
+    match autostart::disable_autostart(config.task_name) {
         Ok(()) => {
             info!(task = config.task_name, "autostart disabled");
             Ok(())

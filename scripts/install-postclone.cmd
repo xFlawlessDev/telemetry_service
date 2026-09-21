@@ -5,7 +5,7 @@
 ::   install-postclone.cmd [path\to\telemetry_service.exe]
 ::
 :: Run on the final cloned machine. Copies the binary if a source exists,
-:: resets activation state/logs, then installs the registry Run startup entry
+:: resets activation state/logs, then installs the Scheduled Task startup entry
 :: so activation runs at first user login.
 
 :: Check for administrative privileges
@@ -62,7 +62,7 @@ if %errorLevel% == 0 (
         exit /B 1
     )
 
-    echo [postclone] activation startup entry installed; agent runs at first user login
+    echo [postclone] activation startup task installed; agent runs at first user login
     echo [postclone] done
     pause
     exit /B 0

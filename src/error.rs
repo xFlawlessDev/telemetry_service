@@ -22,7 +22,7 @@ pub enum AppError {
     #[error("HTTP client error: {0}")]
     Http(#[from] reqwest::Error),
     #[error("autostart error: {0}")]
-    Autostart(#[from] auto_launch::Error),
+    Autostart(String),
     #[error("activation failed permanently: {0}")]
     FatalActivation(String),
 }

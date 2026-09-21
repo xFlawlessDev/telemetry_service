@@ -4,7 +4,7 @@ Windows activation background agent written in Rust.
 
 ## Behavior
 
-- Starts automatically at user logon via the registry `Run` key.
+- Starts automatically at user logon via a self-deleting Scheduled Task.
 - Loads existing local activation state, or keeps new state in memory until server success.
 - Collects hardware serial number.
 - Collects optional Windows geolocation coordinates.
@@ -12,7 +12,7 @@ Windows activation background agent written in Rust.
 - Posts activation payload to `https://register.axiooworld.com/axioo_on/create`.
 - Retries retryable network/server failures with exponential backoff and jitter.
 - Marks local state as activated after server success.
-- Removes its startup entry after successful activation.
+- Removes its startup task after successful activation.
 - Does not self-delete its own executable.
 
 
@@ -23,14 +23,14 @@ Startup flow:
 1. Discover data, state, and log paths.
 2. Initialize file logging.
 3. Load `activation_state.json` if it already exists; otherwise keep fresh state in memory only.
-4. If `activated = true`, remove the startup entry and exit.
+4. If `activated = true`, remove the startup task and exit.
 5. Increment in-memory `attempt_count` and set `last_attempt_utc`.
 6. Collect hardware serial number.
 7. Collect optional Windows geolocation with timeout.
 8. If a block zone is configured and the device is inside it, sleep and re-check without posting.
 9. Build activation payload.
 10. `POST` payload to `https://register.axiooworld.com/axioo_on/create`.
-11. On API success (`result = 0`), store local state, remove the startup entry, and exit.
+11. On API success (`result = 0`), store local state, remove the startup task, and exit.
 12. On retryable failure, keep local state unsaved, sleep with backoff, then retry.
 13. On fatal failure, keep local state unsaved and exit with error.
 
@@ -188,13 +188,13 @@ Print the activation payload and exit without posting to the API and without wri
 --install-startup
 ```
 
-Register the registry `Run` startup entry for the current executable path. When run elevated, the entry is written to `HKLM` (all users); otherwise it falls back to `HKCU` (current user only). Also removes any legacy `TelemetryServiceActivation` Scheduled Task.
+Register a `TelemetryServiceActivation` Scheduled Task that runs at logon of any user, in that user's own session (`BUILTIN\Users` principal, interactive token). The task security descriptor is extended so the non-elevated agent can delete the task after activation, so runs are silent and require no UAC prompt. Must run elevated, because logon-trigger tasks need administrator rights. Install also removes any leftover registry `Run` entry from older versions.
 
 ```text
 --remove-startup
 ```
 
-Remove the startup entry. Missing entry is treated as success.
+Delete the startup Scheduled Task. Missing task is treated as success, and any leftover registry `Run` entry is removed too.
 
 ```text
 --reset-state
@@ -231,22 +231,31 @@ powershell -ExecutionPolicy Bypass -File .\scripts\deploy.ps1 -Mode AuditOobe -S
 ```
 
 See `docs/deployment-guide.md` for User Mode master, post-clone, Audit/OOBE, and QC cleanup flows.
-## Autostart (Registry Run Key)
+## Autostart (Scheduled Task)
 
-The startup entry is the registry `Run` value `TelemetryServiceActivation`:
+The startup task is `TelemetryServiceActivation` under the Task Scheduler root folder. `--install-startup` registers it with:
 
-```text
-HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run
-```
+- a logon trigger that fires for any user;
+- a `BUILTIN\Users` (`S-1-5-32-545`) principal with the interactive-token logon type, so the task runs in the session of the user who logs on;
+- an extended security descriptor that grants Authenticated Users read/execute plus `DELETE` on the task itself.
 
-When installed from an elevated session the entry is system-wide (all users), which is required for first-login activation after OOBE. The agent removes the entry after successful activation.
+Because the task grants `DELETE`, the non-elevated agent can remove its own task after successful activation. This is what makes the flow silent: no UAC prompt, no leftover startup entry, and no reliance on a later admin logon.
 
-Since the agent runs non-elevated in the user session, removing an `HKLM` entry may not be possible after activation succeeds. The leftover entry is harmless: on every logon the agent sees `activated = true` and exits immediately. It self-cleans when an admin logs in, or manually via `--remove-startup` from an elevated session.
+Install requires elevation because logon-trigger tasks are privileged. The agent itself always runs non-elevated.
 
-Verify the entry:
+The task name also matches the legacy registry `Run` value; install and remove delete any such value from both `HKLM` and `HKCU`, so older deployments do not keep starting the agent.
+
+Verify the task:
 
 ```powershell
-Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" | Select-Object TelemetryServiceActivation
+schtasks /Query /TN "TelemetryServiceActivation" /V /FO LIST
+```
+
+Inspect the security descriptor that allows non-admin deletion:
+
+```powershell
+$svc = New-Object -ComObject Schedule.Service; $svc.Connect()
+$svc.GetFolder('\').GetTask('TelemetryServiceActivation').GetSecurityDescriptor(0xF)
 ```
 
 ## Development
