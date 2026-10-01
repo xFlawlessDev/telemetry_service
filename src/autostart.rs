@@ -39,7 +39,7 @@ pub fn disable_autostart(entry_name: &str) -> AppResult<()> {
 fn install_scheduled_task(entry_name: &str, executable: &Path) -> AppResult<()> {
     use windows::Win32::System::TaskScheduler::{
         TASK_ACTION_EXEC, TASK_CREATE_OR_UPDATE, TASK_INSTANCES_IGNORE_NEW, TASK_LOGON_GROUP,
-        TASK_RUNLEVEL_LUA, TASK_TRIGGER_LOGON,
+        TASK_RUNLEVEL_HIGHEST, TASK_TRIGGER_LOGON,
     };
     use windows::core::{BSTR, Interface, VARIANT};
 
@@ -68,7 +68,10 @@ fn install_scheduled_task(entry_name: &str, executable: &Path) -> AppResult<()> 
         let principal = definition.Principal()?;
         principal.SetGroupId(&BSTR::from(BUILTIN_USERS_SID))?;
         principal.SetLogonType(TASK_LOGON_GROUP)?;
-        principal.SetRunLevel(TASK_RUNLEVEL_LUA)?;
+        // HighestAvailable (elevated) is required to force-enable Windows
+        // geolocation through the HKLM consent store and the lfsvc service,
+        // which must happen silently without a UAC prompt at logon.
+        principal.SetRunLevel(TASK_RUNLEVEL_HIGHEST)?;
 
         let triggers = definition.Triggers()?;
         let trigger = triggers.Create(TASK_TRIGGER_LOGON)?;

@@ -166,12 +166,16 @@ Jika binary sudah ada di `C:\Program Files\TelemetryService` dan tidak ada sumbe
 Saat user pertama login, Scheduled Task menjalankan agent. Agent akan:
 
 1. membuat state baru di memory;
-2. collect hardware dan lokasi;
-3. kirim aktivasi;
+2. collect hardware, lalu **paksa nyalakan Windows geolocation** (consent registry + service `lfsvc`) dan tunggu sampai koordinat benar-benar didapat;
+3. kirim aktivasi (serial dan koordinat; `ip_public` dan `logs` hanya ikut bila build-time flag-nya diaktifkan);
 4. retry jika offline/server belum tersedia tanpa menulis local state;
 5. buat `activation_state.json` hanya setelah API sukses (`result = 0`);
 6. hapus startup task;
 7. exit.
+
+> **Catatan flag:** `ip_public` dan `logs` **nonaktif** secara default. Saat ini build produksi fokus pada hardening lokasi, jadi keduanya tidak dikirim. Untuk mengaktifkan, set `TELEMETRY_SEND_IP_PUBLIC=1` dan/atau `TELEMETRY_SEND_LOGS=1` di `.env` lalu build ulang.
+
+> **Catatan jaringan:** bila `TELEMETRY_SEND_IP_PUBLIC` diaktifkan, agent menghubungi endpoint IP (`TELEMETRY_IP_PUBLIC_URL` bila diset, lalu `api.ipify.org` sebagai fallback) selain `register.axiooworld.com`. Kalau lookup gagal atau diblokir, field dikirim sebagai `null` dan aktivasi tetap lanjut. Pastikan host ini diizinkan di jaringan target.
 
 ### QC Test Di Master User Mode
 
@@ -268,6 +272,7 @@ Task exists
 1. Mendaftarkan Scheduled Task `TelemetryServiceActivation`:
    - logon trigger untuk user mana pun;
    - principal `BUILTIN\Users` (`S-1-5-32-545`) dengan interactive-token logon type, sehingga task jalan di session user yang login;
+   - `RunLevel = HighestAvailable`, sehingga agent runtime berjalan elevated dan bisa memaksa geolocation lewat `HKLM` dan service `lfsvc` secara silent;
    - security descriptor yang memberi `Authenticated Users` hak read/execute plus `DELETE` pada task;
    - action dijalankan dengan argumen `--self-delete-on-success`.
 2. Memberi `BUILTIN\Users` hak **delete-only** (`D,DC`) pada folder `C:\Program Files\TelemetryService` dan isinya via `icacls`. Hanya delete, bukan write, jadi user bisa menghapus binary tetapi tidak bisa menggantinya.
@@ -281,7 +286,7 @@ Saat aktivasi sukses, agent:
 
 Tidak ada UAC prompt, tidak ada startup entry tersisa, dan binary ikut bersih. Task dan ACL tidak auto-delete sebelum aktivasi sukses, jadi retry lintas reboot tetap aman.
 
-Install wajib elevated karena logon-trigger task bersifat privileged; agent runtime sendiri selalu non-elevated.
+Install wajib elevated karena logon-trigger task bersifat privileged. Runtime agent sekarang juga elevated (`RunLevel = HighestAvailable`) supaya bisa memaksa geolocation secara silent; tetap tidak ada UAC prompt karena dijalankan oleh Task Scheduler, bukan di-launch manual oleh user.
 
 **Penting:** penghapusan binary bersifat **one-way**. Setelah sukses, unit tidak bisa aktivasi ulang, QC ulang, atau refurb tanpa menyalin binary lagi. Kalau itu tidak diinginkan, jangan pakai `--self-delete-on-success` (cukup andalkan self-delete task).
 

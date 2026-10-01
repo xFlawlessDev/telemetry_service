@@ -10,6 +10,13 @@ pub const DEFAULT_BLOCK_ZONE_POLL_INTERVAL: Duration = Duration::from_secs(5 * 6
 /// production default.
 pub const DEBUG: bool = option_env!("TELEMETRY_DEBUG").is_some();
 
+/// Build-time feature flag for the `ip_public` payload field. Disabled by
+/// default so current builds focus on geolocation hardening.
+pub const SEND_IP_PUBLIC: bool = option_env!("TELEMETRY_SEND_IP_PUBLIC").is_some();
+
+/// Build-time feature flag for the `logs` payload field. Disabled by default.
+pub const SEND_LOGS: bool = option_env!("TELEMETRY_SEND_LOGS").is_some();
+
 #[derive(Debug, Clone, Copy)]
 pub struct AppConfig {
     pub base_url: &'static str,
@@ -18,6 +25,8 @@ pub struct AppConfig {
     pub task_name: &'static str,
     pub request_timeout: Duration,
     pub geolocation_timeout: Duration,
+    pub public_ip_timeout: Duration,
+    pub public_ip_url: Option<&'static str>,
     pub block_zone: Option<BlockZone>,
     pub block_zone_poll_interval: Duration,
     pub initial_backoff: Duration,
@@ -48,6 +57,8 @@ impl AppConfig {
             },
             request_timeout: Duration::from_secs(20),
             geolocation_timeout: Duration::from_secs(10),
+            public_ip_timeout: Duration::from_secs(10),
+            public_ip_url: public_ip_url(),
             block_zone: parse_block_zone(
                 option_env!("TELEMETRY_BLOCK_LATITUDE"),
                 option_env!("TELEMETRY_BLOCK_LONGITUDE"),
@@ -60,6 +71,14 @@ impl AppConfig {
             retry_forever: true,
         }
     }
+}
+
+/// Preferred public-IP endpoint embedded at build time. Empty or whitespace is
+/// treated as unset so the agent falls back to the built-in ipify endpoint.
+fn public_ip_url() -> Option<&'static str> {
+    option_env!("TELEMETRY_IP_PUBLIC_URL")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
 }
 
 fn parse_block_zone(

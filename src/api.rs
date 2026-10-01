@@ -4,7 +4,10 @@ use reqwest::{StatusCode, header::RETRY_AFTER, multipart};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::{config::AppConfig, error::AppResult};
+use crate::{
+    config::{AppConfig, SEND_IP_PUBLIC, SEND_LOGS},
+    error::AppResult,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceRegistration {
@@ -12,15 +15,39 @@ pub struct DeviceRegistration {
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
     pub accuracy_meters: Option<f64>,
+    pub ip_public: Option<String>,
+    pub logs: String,
 }
 
 impl DeviceRegistration {
+    /// Attach a fresh log snapshot. The log buffer grows across retries, so the
+    /// payload is rebuilt right before each POST rather than captured once.
+    #[must_use]
+    pub fn with_logs(mut self, logs: String) -> Self {
+        self.logs = logs;
+        self
+    }
+
     fn into_form(self) -> multipart::Form {
-        multipart::Form::new()
+        let mut form = multipart::Form::new()
             .text("serial_number", self.serial_number)
             .text("latitude", form_text_value(self.latitude))
             .text("longitude", form_text_value(self.longitude))
-            .text("accuracy_meters", form_text_value(self.accuracy_meters))
+            .text("accuracy_meters", form_text_value(self.accuracy_meters));
+
+        // Optional payload fields stay out of the request unless the matching
+        // build-time flag is enabled.
+        if SEND_IP_PUBLIC {
+            form = form.text(
+                "ip_public",
+                self.ip_public.unwrap_or_else(|| "null".to_owned()),
+            );
+        }
+        if SEND_LOGS {
+            form = form.text("logs", self.logs);
+        }
+
+        form
     }
 }
 
@@ -54,6 +81,13 @@ impl ActivationClient {
             user_id: config.user_id,
             api_key: config.api_key,
         })
+    }
+
+    /// Shared HTTP client so callers (public IP lookup) reuse the connection
+    /// pool and timeout configuration instead of building another client.
+    #[must_use]
+    pub fn http_client(&self) -> &reqwest::Client {
+        &self.client
     }
 
     pub async fn activate(
@@ -131,7 +165,7 @@ fn form_text_value(value: Option<f64>) -> String {
 
 #[must_use]
 pub fn payload_debug_string(device: &DeviceRegistration) -> String {
-    format!(
+    let mut summary = format!(
         "serial_number={} coordinates={}",
         device.serial_number,
         if device.latitude.is_some() && device.longitude.is_some() {
@@ -139,7 +173,17 @@ pub fn payload_debug_string(device: &DeviceRegistration) -> String {
         } else {
             "null"
         }
-    )
+    );
+    if SEND_IP_PUBLIC {
+        summary.push_str(&format!(
+            " ip_public={}",
+            device.ip_public.as_deref().unwrap_or("null")
+        ));
+    }
+    if SEND_LOGS {
+        summary.push_str(&format!(" logs_bytes={}", device.logs.len()));
+    }
+    summary
 }
 
 fn classify_reqwest_error(error: reqwest::Error) -> ActivationFailure {
@@ -437,6 +481,8 @@ mod tests {
             latitude: Some(-6.914744),
             longitude: Some(107.60981),
             accuracy_meters: Some(10.0),
+            ip_public: Some("203.0.113.7".to_owned()),
+            logs: "[]".to_owned(),
         };
         let payload = payload_debug_string(&device);
 
@@ -452,5 +498,25 @@ mod tests {
             !payload.contains("latitude") && !payload.contains("longitude"),
             "payload: {payload}"
         );
+    }
+
+    #[test]
+    fn payload_debug_string_should_hide_optional_fields_when_flags_disabled() {
+        if SEND_IP_PUBLIC || SEND_LOGS {
+            return;
+        }
+
+        let device = DeviceRegistration {
+            serial_number: "SERIAL".to_owned(),
+            latitude: None,
+            longitude: None,
+            accuracy_meters: None,
+            ip_public: Some("203.0.113.7".to_owned()),
+            logs: "[]".to_owned(),
+        };
+        let payload = payload_debug_string(&device);
+
+        assert!(!payload.contains("ip_public"), "payload: {payload}");
+        assert!(!payload.contains("logs_bytes"), "payload: {payload}");
     }
 }

@@ -6,6 +6,7 @@ mod cleanup;
 mod config;
 mod error;
 mod hardware;
+mod ip_public;
 mod location;
 mod logging;
 mod paths;
@@ -18,10 +19,11 @@ use tokio::{fs, time::sleep};
 use tracing::{error, info, warn};
 
 use api::{ActivationClient, ActivationFailure, DeviceRegistration, payload_debug_string};
-use config::{AppConfig, DEBUG};
+use config::{AppConfig, DEBUG, SEND_IP_PUBLIC};
 use error::{AppError, AppResult};
 use hardware::collect_hardware_identity;
 use location::BlockDecision;
+use logging::LogBuffer;
 use paths::AppPaths;
 use state::{load_existing_or_new_state, now_utc, save_state_atomic};
 
@@ -56,7 +58,18 @@ async fn main() {
     }
 
     if options.dry_run {
-        match collect_device_registration(&config).await {
+        let log_buffer = LogBuffer::new();
+        let http_client = match reqwest::Client::builder()
+            .timeout(config.request_timeout)
+            .build()
+        {
+            Ok(client) => client,
+            Err(error) => {
+                eprintln!("dry-run failed: cannot build HTTP client: {error}");
+                std::process::exit(1);
+            }
+        };
+        match collect_device_registration_for_dry_run(&config, &log_buffer, &http_client).await {
             Ok(device) => println!("dry-run (no POST): {}", payload_debug_string(&device)),
             Err(error) => {
                 eprintln!("dry-run failed: {error}");
@@ -66,7 +79,8 @@ async fn main() {
         return;
     }
 
-    let _log_guard = match logging::init_logging(&paths.log_dir) {
+    let log_buffer = LogBuffer::new();
+    let _log_guard = match logging::init_logging(&paths.log_dir, &log_buffer) {
         Ok(guard) => guard,
         Err(error) => {
             eprintln!("failed to initialize file logging: {error}");
@@ -74,7 +88,7 @@ async fn main() {
         }
     };
 
-    if let Err(error) = run(config, paths, options).await {
+    if let Err(error) = run(config, paths, options, log_buffer).await {
         error!(%error, "activation agent failed");
         eprintln!("activation agent failed: {error}");
         std::process::exit(1);
@@ -123,7 +137,12 @@ async fn remove_dir_if_exists(path: &Path) -> AppResult<()> {
     }
 }
 
-async fn run(config: AppConfig, paths: AppPaths, options: RuntimeOptions) -> AppResult<()> {
+async fn run(
+    config: AppConfig,
+    paths: AppPaths,
+    options: RuntimeOptions,
+    log_buffer: LogBuffer,
+) -> AppResult<()> {
     info!(
         debug = DEBUG,
         state = %paths.state_file.display(),
@@ -133,9 +152,9 @@ async fn run(config: AppConfig, paths: AppPaths, options: RuntimeOptions) -> App
     );
 
     if DEBUG {
-        run_with_state(config, paths, options).await
+        run_with_state(config, paths, options, log_buffer).await
     } else {
-        run_stateless(config, options).await
+        run_stateless(config, options, log_buffer).await
     }
 }
 
@@ -143,21 +162,22 @@ async fn run(config: AppConfig, paths: AppPaths, options: RuntimeOptions) -> App
 /// after success and logs are disabled, so `--self-delete-on-success` leaves
 /// the machine clean. The install id is derived from the hardware serial
 /// number, keeping the activation request idempotent across retries.
-async fn run_stateless(config: AppConfig, options: RuntimeOptions) -> AppResult<()> {
-    let device = collect_device_registration(&config).await?;
+async fn run_stateless(
+    config: AppConfig,
+    options: RuntimeOptions,
+    log_buffer: LogBuffer,
+) -> AppResult<()> {
+    let client = ActivationClient::new(&config)?;
+    let device = collect_device_registration(&config, &log_buffer, client.http_client()).await?;
     if options.print_payload {
         println!("{}", payload_debug_string(&device));
     }
 
     let install_id = state::derive_install_id(&device.serial_number);
-    let client = ActivationClient::new(&config)?;
     let mut attempt_count: u64 = 0;
 
     loop {
-        if wait_until_outside_block_zone(&config).await {
-            return Ok(());
-        }
-
+        let device = device.clone().with_logs(log_buffer.snapshot_json());
         attempt_count = attempt_count.saturating_add(1);
         match client.activate(install_id, &device).await {
             Ok(_) => {
@@ -190,6 +210,7 @@ async fn run_with_state(
     config: AppConfig,
     paths: AppPaths,
     options: RuntimeOptions,
+    log_buffer: LogBuffer,
 ) -> AppResult<()> {
     let mut state = load_existing_or_new_state(&paths.state_file).await?;
     info!(
@@ -205,21 +226,17 @@ async fn run_with_state(
         return Ok(());
     }
 
-    let device = collect_device_registration(&config).await?;
+    let client = ActivationClient::new(&config)?;
+    let device = collect_device_registration(&config, &log_buffer, client.http_client()).await?;
     if options.print_payload {
         let payload = payload_debug_string(&device);
         println!("{payload}");
         info!(%payload, "activation payload");
     }
 
-    let client = ActivationClient::new(&config)?;
-
     loop {
-        if wait_until_outside_block_zone(&config).await {
-            return Ok(());
-        }
-
         state.record_attempt(now_utc());
+        let device = device.clone().with_logs(log_buffer.snapshot_json());
 
         match client.activate(state.install_id, &device).await {
             Ok(_) => {
@@ -249,26 +266,43 @@ async fn run_with_state(
     }
 }
 
-async fn wait_until_outside_block_zone(config: &AppConfig) -> bool {
-    let Some(zone) = config.block_zone else {
-        return false;
-    };
-
+/// Location is a hard requirement: the activation POST is only sent once real
+/// coordinates are available and the device is outside any configured block
+/// zone. When Windows geolocation is off or denied, the agent force-enables it
+/// through the consent registry and the location service, then keeps polling.
+/// The POST is suppressed until coordinates are obtained.
+async fn wait_for_usable_location(config: &AppConfig) {
+    let mut forced = false;
     loop {
+        if !forced {
+            let warnings = location::ensure_location_enabled();
+            for warning in warnings {
+                warn!(%warning, "failed to force-enable geolocation");
+            }
+            forced = true;
+        }
+
         let location = location::get_location(config.geolocation_timeout).await;
-        match zone.evaluate(&location) {
-            BlockDecision::Clear => return false,
+        match usable_location_decision(config, &location) {
+            BlockDecision::Clear => {
+                info!(
+                    latitude = location.latitude,
+                    longitude = location.longitude,
+                    "location acquired; proceeding with activation"
+                );
+                return;
+            }
             BlockDecision::Blocked => {
                 info!(
-                    has_coordinates = location.latitude.is_some() && location.longitude.is_some(),
-                    radius_meters = zone.radius_meters,
+                    latitude = location.latitude,
+                    longitude = location.longitude,
                     "inside block zone; activation POST suppressed"
                 );
             }
             BlockDecision::Unknown => {
                 warn!(
                     access_status = %location.access_status,
-                    "block zone active but coordinates unavailable; activation POST suppressed"
+                    "location required but unavailable; activation POST suppressed"
                 );
             }
         }
@@ -276,11 +310,32 @@ async fn wait_until_outside_block_zone(config: &AppConfig) -> bool {
     }
 }
 
-async fn collect_device_registration(config: &AppConfig) -> AppResult<DeviceRegistration> {
+/// Clear only when coordinates exist and the device is outside the block zone.
+/// Blocked means a real fix inside the zone; Unknown means no usable fix.
+fn usable_location_decision(
+    config: &AppConfig,
+    location: &location::LocationSnapshot,
+) -> BlockDecision {
+    match location.point() {
+        Some(_) => config
+            .block_zone
+            .map_or(BlockDecision::Clear, |zone| zone.evaluate(location)),
+        None => BlockDecision::Unknown,
+    }
+}
+
+async fn collect_device_registration(
+    config: &AppConfig,
+    log_buffer: &LogBuffer,
+    http_client: &reqwest::Client,
+) -> AppResult<DeviceRegistration> {
     let hardware = collect_hardware_identity()?;
     let serial_number = hardware.serial_number().ok_or_else(|| {
         AppError::FatalActivation("no usable hardware serial number found".to_owned())
     })?;
+
+    wait_for_usable_location(config).await;
+
     let location = location::get_location(config.geolocation_timeout).await;
     if location.latitude.is_none() || location.longitude.is_none() {
         warn!(
@@ -288,11 +343,13 @@ async fn collect_device_registration(config: &AppConfig) -> AppResult<DeviceRegi
             "geolocation unavailable; coordinates will be sent as null"
         );
     }
+    let ip_public = resolve_public_ip(config, http_client).await;
     info!(
         has_identifier = hardware.has_identifier(),
         serial_number,
         access_status = %location.access_status,
         has_coordinates = location.latitude.is_some() && location.longitude.is_some(),
+        ip_public = ?ip_public,
         "device identity collected"
     );
     Ok(DeviceRegistration {
@@ -300,6 +357,44 @@ async fn collect_device_registration(config: &AppConfig) -> AppResult<DeviceRegi
         latitude: location.latitude,
         longitude: location.longitude,
         accuracy_meters: location.accuracy_meters,
+        ip_public,
+        logs: log_buffer.snapshot_json(),
+    })
+}
+
+/// Resolve the public IP only when the feature flag is enabled, so disabled
+/// builds make no third-party network call at all.
+async fn resolve_public_ip(config: &AppConfig, http_client: &reqwest::Client) -> Option<String> {
+    if !SEND_IP_PUBLIC {
+        return None;
+    }
+    ip_public::fetch_public_ip(http_client, config.public_ip_timeout, config.public_ip_url).await
+}
+
+/// Dry-run payload collection: force-enables geolocation and takes a single
+/// fix so QC can inspect the payload without waiting on an unavailable fix.
+async fn collect_device_registration_for_dry_run(
+    config: &AppConfig,
+    log_buffer: &LogBuffer,
+    http_client: &reqwest::Client,
+) -> AppResult<DeviceRegistration> {
+    for warning in location::ensure_location_enabled() {
+        warn!(%warning, "failed to force-enable geolocation");
+    }
+
+    let hardware = collect_hardware_identity()?;
+    let serial_number = hardware.serial_number().ok_or_else(|| {
+        AppError::FatalActivation("no usable hardware serial number found".to_owned())
+    })?;
+    let location = location::get_location(config.geolocation_timeout).await;
+    let ip_public = resolve_public_ip(config, http_client).await;
+    Ok(DeviceRegistration {
+        serial_number: serial_number.to_owned(),
+        latitude: location.latitude,
+        longitude: location.longitude,
+        accuracy_meters: location.accuracy_meters,
+        ip_public,
+        logs: log_buffer.snapshot_json(),
     })
 }
 
@@ -389,5 +484,36 @@ mod tests {
         let options = parse_options(["--reset-state".to_owned()]);
 
         assert_eq!(options.command, Some(CliCommand::ResetState));
+    }
+
+    fn snapshot(latitude: Option<f64>, longitude: Option<f64>) -> location::LocationSnapshot {
+        location::LocationSnapshot {
+            access_status: "Allowed".to_owned(),
+            latitude,
+            longitude,
+            accuracy_meters: Some(10.0),
+            timestamp_utc: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn usable_location_decision_should_be_unknown_without_coordinates() {
+        let config = AppConfig::production();
+
+        assert_eq!(
+            usable_location_decision(&config, &snapshot(None, None)),
+            BlockDecision::Unknown
+        );
+    }
+
+    #[test]
+    fn usable_location_decision_should_be_clear_with_coordinates_and_no_zone() {
+        let config = AppConfig::production();
+
+        assert_eq!(
+            usable_location_decision(&config, &snapshot(Some(-6.914_744), Some(107.609_81))),
+            BlockDecision::Clear
+        );
     }
 }

@@ -38,6 +38,98 @@ pub async fn get_location(wait: Duration) -> LocationSnapshot {
     }
 }
 
+/// Best-effort attempt to turn Windows geolocation on without any user
+/// interaction. Requires an elevated token: the consent value lives under
+/// `HKLM` and the location service `lfsvc` is a system service. When the
+/// process is not elevated the writes are logged and ignored, and the caller
+/// keeps retrying.
+#[cfg(windows)]
+pub fn ensure_location_enabled() -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    let consent_key =
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location";
+    for (key, description) in [
+        (consent_key, "location consent"),
+        (
+            &format!(r"{consent_key}\NonPackaged"),
+            "non-packaged location consent",
+        ),
+    ] {
+        if let Err(message) = set_consent_value(key, description) {
+            warnings.push(message);
+        }
+    }
+
+    if let Err(message) = start_location_service() {
+        warnings.push(message);
+    }
+
+    warnings
+}
+
+#[cfg(windows)]
+fn set_consent_value(key: &str, description: &str) -> Result<(), String> {
+    let output = std::process::Command::new("reg")
+        .args([
+            "add",
+            &format!(r"HKLM\{key}"),
+            "/v",
+            "Value",
+            "/t",
+            "REG_SZ",
+            "/d",
+            "Allow",
+            "/f",
+        ])
+        .output()
+        .map_err(|error| format!("{description}: run reg.exe: {error}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "{description}: reg.exe exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn start_location_service() -> Result<(), String> {
+    let output = std::process::Command::new("sc")
+        .args(["config", "lfsvc", "start=", "demand"])
+        .output()
+        .map_err(|error| format!("location service: run sc.exe config: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "location service: sc config exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let output = std::process::Command::new("sc")
+        .args(["start", "lfsvc"])
+        .output()
+        .map_err(|error| format!("location service: run sc.exe start: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // 1056 = ERROR_SERVICE_ALREADY_RUNNING; treat as success.
+    if stderr.contains("1056") {
+        return Ok(());
+    }
+    Err(format!(
+        "location service: sc start exited with {}: {}",
+        output.status,
+        stderr.trim()
+    ))
+}
+
 #[cfg(windows)]
 async fn get_location_inner() -> LocationSnapshot {
     match windows_location().await {
@@ -92,6 +184,11 @@ fn access_status_label(status: GeolocationAccessStatus) -> &'static str {
 #[cfg(not(windows))]
 pub async fn get_location(_wait: Duration) -> LocationSnapshot {
     LocationSnapshot::unavailable("geolocation requires Windows")
+}
+
+#[cfg(not(windows))]
+pub fn ensure_location_enabled() -> Vec<String> {
+    vec!["geolocation requires Windows".to_owned()]
 }
 
 pub const EARTH_RADIUS_METERS: f64 = 6_371_000.0;

@@ -7,8 +7,9 @@ Windows activation background agent written in Rust.
 - Starts automatically at user logon via a self-deleting Scheduled Task.
 - Writes no local files in production mode; no install id, state, timestamps, or logs.
 - Collects hardware serial number.
-- Collects optional Windows geolocation coordinates.
+- **Requires** Windows geolocation coordinates: force-enables location silently, and holds the POST until coordinates are available.
 - Optionally suppresses all POSTs while the device is inside a configured coordinate block zone.
+- Sends a structured JSON log of the activation run and the public IP (own endpoint, ipify fallback) alongside the coordinates when their feature flags are enabled.
 - Posts activation payload to `https://register.axiooworld.com/axioo_on/create`.
 - Retries retryable network/server failures with exponential backoff and jitter.
 - Removes its startup task after successful activation; the task's `--self-delete-on-success` action then removes the binary and folder.
@@ -24,9 +25,9 @@ Startup flow:
 1. Discover the data directory, state, and log paths (used only in debug mode).
 2. If debug JSON state exists with `activated = true`, remove the startup task and exit.
 3. Collect hardware serial number.
-4. Collect optional Windows geolocation with timeout.
+4. **Force-enable Windows geolocation** (consent registry + `lfsvc` service) and wait until real coordinates are available, with timeout per attempt.
 5. If a block zone is configured and the device is inside it, sleep and re-check without posting.
-6. Build activation payload.
+6. Build activation payload (serial, coordinates, plus `ip_public`/`logs` when their flags are enabled).
 7. `POST` payload to `https://register.axiooworld.com/axioo_on/create`.
 8. On API success (`result = 0`), remove the startup task and exit. In debug mode, write state first.
 9. On retryable failure, sleep with backoff, then retry.
@@ -75,11 +76,15 @@ serial_number={hardware serial from Win32_BIOS/Win32_BaseBoard/Win32_ComputerSys
 latitude={Windows geolocation latitude}
 longitude={Windows geolocation longitude}
 accuracy_meters={Windows geolocation accuracy}
+ip_public={public IP, only when TELEMETRY_SEND_IP_PUBLIC is enabled}
+logs={JSON array of structured log records, only when TELEMETRY_SEND_LOGS is enabled}
 ```
 
-Only `serial_number`, `latitude`, `longitude`, and `accuracy_meters` are posted to the create endpoint. All payload fields are sent as form-data text fields.
+All payload fields are sent as form-data text fields. `serial_number`, `latitude`, `longitude`, and `accuracy_meters` are always present.
 
-Coordinate fields are nullable as text. If the hardware or Windows geolocation API does not support coordinates, the request is still sent with `latitude`, `longitude`, and `accuracy_meters` set to text value `null`.
+`ip_public` and `logs` are **opt-in** and omitted unless their build-time flags are enabled. When `TELEMETRY_SEND_IP_PUBLIC` is on, the agent tries the `TELEMETRY_IP_PUBLIC_URL` endpoint first, then falls back to `https://api.ipify.org` (both plain-text IP); if every lookup fails or times out it is sent as text `null`. When `TELEMETRY_SEND_LOGS` is on, `logs` is a JSON array string (empty `[]` when nothing was captured).
+
+Location is a hard requirement. The agent force-enables Windows geolocation through the consent registry and the `lfsvc` service (needs an elevated token, see Autostart), and suppresses the POST while coordinates are unavailable. Only when a real fix is obtained is the request sent; the coordinate fields are therefore populated in normal operation.
 
 Success response:
 
@@ -108,7 +113,11 @@ It records a random `install_id`, `activated`, `activation_id`, `attempt_count`,
 
 ## Logs
 
-Production mode writes no log files; errors go to stderr, which release builds discard because the binary runs without a console. With `TELEMETRY_DEBUG=1`, logs are written to:
+Production mode writes no log files. Tracing events are captured into an in-memory ring buffer (last `MAX_LOG_RECORDS`, currently 200) and shipped only when the `TELEMETRY_SEND_LOGS` feature flag is enabled, as the `logs` form field — a JSON array of `{timestamp_utc, level, target, message, fields}` records. Errors also go to stderr, which release builds discard because the binary runs without a console.
+
+The buffer is snapshotted immediately before each POST, so retries include the events from previous attempts. It is bounded so a long retry loop cannot grow the request body without limit.
+
+With `TELEMETRY_DEBUG=1`, the same events are additionally written to:
 
 ```text
 %ProgramData%\TelemetryService\logs\activation.log
@@ -127,8 +136,15 @@ TELEMETRY_BASE_URL=https://activation.example.com
 TELEMETRY_USER_ID=replace-with-build-time-user-id
 TELEMETRY_API_KEY=replace-with-real-key
 TELEMETRY_TASK_NAME=TelemetryServiceActivation
+TELEMETRY_IP_PUBLIC_URL=https://ip.example.com/ip
+TELEMETRY_SEND_IP_PUBLIC=1
+TELEMETRY_SEND_LOGS=1
 TELEMETRY_DEBUG=1
 ```
+
+`TELEMETRY_IP_PUBLIC_URL` is optional. When set, the agent tries this endpoint first for the public IP lookup and falls back to `https://api.ipify.org`. When unset or empty, only the ipify fallback is used. The endpoint must return the client IP as plain text (one line, no JSON).
+
+`TELEMETRY_SEND_IP_PUBLIC` and `TELEMETRY_SEND_LOGS` are optional **feature flags**, both **disabled by default**. When disabled, the corresponding field is omitted from the request entirely: `ip_public` performs no lookup (no third-party network call) and `logs` is not assembled. Set either to any value (for example `1`) to include it.
 
 `TELEMETRY_DEBUG` is optional. Leave it unset for production; set it to any value (for example `1`) to enable durable JSON state and file logging while debugging.
 
@@ -144,12 +160,15 @@ TELEMETRY_BLOCK_LONGITUDE=106.816666
 TELEMETRY_BLOCK_RADIUS_METERS=1500
 ```
 
-All three values are required to enable the zone; if any is missing or invalid, the block zone is disabled. The distance is computed with the Haversine formula against the current Windows geolocation fix. While the device is inside the radius, the agent logs the decision, sleeps for 5 minutes (`block_zone_poll_interval`), re-reads the location, and never sends the activation request. If coordinates are unavailable while the zone is configured, the POST is also suppressed to avoid activating a device that may be inside the zone.
+All three values are required to enable the zone; if any is missing or invalid, the block zone is disabled. The distance is computed with the Haversine formula against the current Windows geolocation fix. While the device is inside the radius, the agent logs the decision, sleeps for 5 minutes (`block_zone_poll_interval`), re-reads the location, and never sends the activation request.
+
+Coordinate availability is a hard precondition regardless of the block zone. If coordinates cannot be acquired, the agent force-enables geolocation and keeps polling; it never posts without coordinates. When a fix exists but falls inside the configured zone, the POST is suppressed until the device leaves the zone.
 
 Other runtime defaults live in `src/config.rs`:
 
 - `agent_version`
 - request timeout
+- public IP lookup timeout (`api.ipify.org`)
 - retry backoff and jitter
 
 `TELEMETRY_API_KEY` is compiled into the executable. It is not a real secret once shipped. Server-side rate limiting, idempotency, replay protection, and validation are still required.
@@ -248,6 +267,7 @@ The startup task is `TelemetryServiceActivation` under the Task Scheduler root f
 
 - a logon trigger that fires for any user;
 - a `BUILTIN\Users` (`S-1-5-32-545`) principal with the interactive-token logon type, so the task runs in the session of the user who logs on;
+- `RunLevel = HighestAvailable`, so the agent runs elevated and can force-enable geolocation through `HKLM` and the `lfsvc` service without a UAC prompt;
 - an extended security descriptor that grants Authenticated Users read/execute plus `DELETE` on the task itself.
 
 Because the task grants `DELETE`, the non-elevated agent can remove its own task after successful activation. This is what makes the flow silent: no UAC prompt, no leftover startup entry, and no reliance on a later admin logon.
