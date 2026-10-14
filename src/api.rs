@@ -12,6 +12,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeviceRegistration {
     pub serial_number: String,
+    pub app_version: String,
     pub latitude: Option<f64>,
     pub longitude: Option<f64>,
     pub accuracy_meters: Option<f64>,
@@ -29,25 +30,36 @@ impl DeviceRegistration {
     }
 
     fn into_form(self) -> multipart::Form {
-        let mut form = multipart::Form::new()
-            .text("serial_number", self.serial_number)
-            .text("latitude", form_text_value(self.latitude))
-            .text("longitude", form_text_value(self.longitude))
-            .text("accuracy_meters", form_text_value(self.accuracy_meters));
+        let mut form = multipart::Form::new();
+        for (name, value) in self.form_fields() {
+            form = form.text(name, value);
+        }
+        form
+    }
 
-        // Optional payload fields stay out of the request unless the matching
-        // build-time flag is enabled.
+    /// Multipart text fields in send order. `app_version` is always included so
+    /// production traces can be tied to a build; the optional fields are
+    /// appended only when their build-time flag is enabled.
+    fn form_fields(&self) -> Vec<(&'static str, String)> {
+        let mut fields = vec![
+            ("serial_number", self.serial_number.clone()),
+            ("app_version", self.app_version.clone()),
+            ("latitude", form_text_value(self.latitude)),
+            ("longitude", form_text_value(self.longitude)),
+            ("accuracy_meters", form_text_value(self.accuracy_meters)),
+        ];
+
         if SEND_IP_PUBLIC {
-            form = form.text(
+            fields.push((
                 "ip_public",
-                self.ip_public.unwrap_or_else(|| "null".to_owned()),
-            );
+                self.ip_public.clone().unwrap_or_else(|| "null".to_owned()),
+            ));
         }
         if SEND_LOGS {
-            form = form.text("logs", self.logs);
+            fields.push(("logs", self.logs.clone()));
         }
 
-        form
+        fields
     }
 }
 
@@ -166,8 +178,9 @@ fn form_text_value(value: Option<f64>) -> String {
 #[must_use]
 pub fn payload_debug_string(device: &DeviceRegistration) -> String {
     let mut summary = format!(
-        "serial_number={} coordinates={}",
+        "serial_number={} app_version={} coordinates={}",
         device.serial_number,
+        device.app_version,
         if device.latitude.is_some() && device.longitude.is_some() {
             "present"
         } else {
@@ -338,6 +351,7 @@ fn classify_token_missing(body: &str) -> ActivationFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::APP_VERSION;
 
     #[test]
     fn classify_status_should_treat_429_as_retryable() {
@@ -474,20 +488,74 @@ mod tests {
         assert_eq!(form_text_value(None), "null");
     }
 
-    #[test]
-    fn payload_debug_string_should_include_serial_number_without_coordinates() {
-        let device = DeviceRegistration {
+    fn device() -> DeviceRegistration {
+        DeviceRegistration {
             serial_number: "0223290070363009024".to_owned(),
+            app_version: APP_VERSION.to_owned(),
             latitude: Some(-6.914744),
             longitude: Some(107.60981),
             accuracy_meters: Some(10.0),
             ip_public: Some("203.0.113.7".to_owned()),
-            logs: "[]".to_owned(),
-        };
-        let payload = payload_debug_string(&device);
+            logs: r#"[{"level":"INFO"}]"#.to_owned(),
+        }
+    }
+
+    #[test]
+    fn form_fields_should_always_include_app_version() {
+        let fields = device().form_fields();
+
+        assert_eq!(
+            fields
+                .iter()
+                .find(|(name, _)| *name == "app_version")
+                .map(|(_, value)| value.as_str()),
+            Some(APP_VERSION)
+        );
+    }
+
+    #[test]
+    fn form_fields_should_include_optional_fields_only_when_enabled() {
+        let names: Vec<&str> = device()
+            .form_fields()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+
+        assert_eq!(names.contains(&"ip_public"), SEND_IP_PUBLIC);
+        assert_eq!(names.contains(&"logs"), SEND_LOGS);
+    }
+
+    #[test]
+    fn form_fields_should_keep_required_fields_in_send_order() {
+        let names: Vec<&str> = device()
+            .form_fields()
+            .into_iter()
+            .map(|(name, _)| name)
+            .take(5)
+            .collect();
+
+        assert_eq!(
+            names,
+            vec![
+                "serial_number",
+                "app_version",
+                "latitude",
+                "longitude",
+                "accuracy_meters"
+            ]
+        );
+    }
+
+    #[test]
+    fn payload_debug_string_should_include_serial_number_without_coordinates() {
+        let payload = payload_debug_string(&device());
 
         assert!(
             payload.contains("serial_number=0223290070363009024"),
+            "payload: {payload}"
+        );
+        assert!(
+            payload.contains(&format!("app_version={APP_VERSION}")),
             "payload: {payload}"
         );
         assert!(
@@ -506,15 +574,7 @@ mod tests {
             return;
         }
 
-        let device = DeviceRegistration {
-            serial_number: "SERIAL".to_owned(),
-            latitude: None,
-            longitude: None,
-            accuracy_meters: None,
-            ip_public: Some("203.0.113.7".to_owned()),
-            logs: "[]".to_owned(),
-        };
-        let payload = payload_debug_string(&device);
+        let payload = payload_debug_string(&device());
 
         assert!(!payload.contains("ip_public"), "payload: {payload}");
         assert!(!payload.contains("logs_bytes"), "payload: {payload}");

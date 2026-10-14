@@ -19,7 +19,7 @@ use tokio::{fs, time::sleep};
 use tracing::{error, info, warn};
 
 use api::{ActivationClient, ActivationFailure, DeviceRegistration, payload_debug_string};
-use config::{AppConfig, DEBUG, SEND_IP_PUBLIC};
+use config::{APP_VERSION, AppConfig, DEBUG, SEND_IP_PUBLIC};
 use error::{AppError, AppResult};
 use hardware::collect_hardware_identity;
 use location::BlockDecision;
@@ -144,7 +144,11 @@ async fn run(
     log_buffer: LogBuffer,
 ) -> AppResult<()> {
     info!(
+        app_version = APP_VERSION,
+        session_id = %log_buffer.session_id(),
         debug = DEBUG,
+        send_logs = config::SEND_LOGS,
+        send_ip_public = config::SEND_IP_PUBLIC,
         state = %paths.state_file.display(),
         log = %paths.log_file.display(),
         data_dir = %paths.data_dir.display(),
@@ -177,11 +181,17 @@ async fn run_stateless(
     let mut attempt_count: u64 = 0;
 
     loop {
-        let device = device.clone().with_logs(log_buffer.snapshot_json());
         attempt_count = attempt_count.saturating_add(1);
+        log_buffer.set_attempt(attempt_count);
+        info!(
+            install_id = %install_id,
+            attempt = attempt_count,
+            "activation attempt"
+        );
+        let device = device.clone().with_logs(log_buffer.snapshot_json());
         match client.activate(install_id, &device).await {
             Ok(_) => {
-                info!(%install_id, "registration succeeded");
+                info!(%install_id, attempt = attempt_count, "registration succeeded");
                 cleanup_autostart(&config).await?;
                 schedule_app_removal_if_requested(options);
                 return Ok(());
@@ -193,7 +203,7 @@ async fn run_stateless(
                 retry_after,
                 reason,
             }) => {
-                warn!(%reason, "registration retryable failure");
+                warn!(%reason, attempt = attempt_count, "registration retryable failure");
                 if options.once || !config.retry_forever {
                     return Ok(());
                 }
@@ -236,13 +246,23 @@ async fn run_with_state(
 
     loop {
         state.record_attempt(now_utc());
+        log_buffer.set_attempt(state.attempt_count);
+        info!(
+            install_id = %state.install_id,
+            attempt = state.attempt_count,
+            "activation attempt"
+        );
         let device = device.clone().with_logs(log_buffer.snapshot_json());
 
         match client.activate(state.install_id, &device).await {
             Ok(_) => {
                 state.mark_activated(state.install_id.to_string());
                 save_state_atomic(&paths.state_file, &state).await?;
-                info!(activation_id = ?state.activation_id, "registration succeeded");
+                info!(
+                    activation_id = ?state.activation_id,
+                    attempt = state.attempt_count,
+                    "registration succeeded"
+                );
                 cleanup_autostart(&config).await?;
                 schedule_app_removal_if_requested(options);
                 return Ok(());
@@ -254,7 +274,11 @@ async fn run_with_state(
                 reason,
                 retry_after,
             }) => {
-                warn!(%reason, "registration retryable failure");
+                warn!(
+                    %reason,
+                    attempt = state.attempt_count,
+                    "registration retryable failure"
+                );
                 if options.once || !config.retry_forever {
                     return Ok(());
                 }
@@ -345,6 +369,7 @@ async fn collect_device_registration(
     }
     let ip_public = resolve_public_ip(config, http_client).await;
     info!(
+        app_version = APP_VERSION,
         has_identifier = hardware.has_identifier(),
         serial_number,
         access_status = %location.access_status,
@@ -354,6 +379,7 @@ async fn collect_device_registration(
     );
     Ok(DeviceRegistration {
         serial_number: serial_number.to_owned(),
+        app_version: APP_VERSION.to_owned(),
         latitude: location.latitude,
         longitude: location.longitude,
         accuracy_meters: location.accuracy_meters,
@@ -390,6 +416,7 @@ async fn collect_device_registration_for_dry_run(
     let ip_public = resolve_public_ip(config, http_client).await;
     Ok(DeviceRegistration {
         serial_number: serial_number.to_owned(),
+        app_version: APP_VERSION.to_owned(),
         latitude: location.latitude,
         longitude: location.longitude,
         accuracy_meters: location.accuracy_meters,

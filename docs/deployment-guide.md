@@ -167,15 +167,13 @@ Saat user pertama login, Scheduled Task menjalankan agent. Agent akan:
 
 1. membuat state baru di memory;
 2. collect hardware, lalu **paksa nyalakan Windows geolocation** (consent registry + service `lfsvc`) dan tunggu sampai koordinat benar-benar didapat;
-3. kirim aktivasi (serial dan koordinat; `ip_public` dan `logs` hanya ikut bila build-time flag-nya diaktifkan);
-4. retry jika offline/server belum tersedia tanpa menulis local state;
-5. buat `activation_state.json` hanya setelah API sukses (`result = 0`);
-6. hapus startup task;
-7. exit.
+3. kirim aktivasi (serial, `app_version`, dan koordinat; `ip_public` dan `logs` ikut secara default);
+4. retry jika offline/server belum tersedia tanpa menulis local state (mode debug menyimpan `activation_state.json`);
+5. hapus startup task, lalu exit.
 
-> **Catatan flag:** `ip_public` dan `logs` **nonaktif** secara default. Saat ini build produksi fokus pada hardening lokasi, jadi keduanya tidak dikirim. Untuk mengaktifkan, set `TELEMETRY_SEND_IP_PUBLIC=1` dan/atau `TELEMETRY_SEND_LOGS=1` di `.env` lalu build ulang.
+> **Catatan flag:** `ip_public` dan `logs` **aktif** secara default, jadi build produksi mengirim IP publik dan log aktivasi untuk kebutuhan trace. Set `TELEMETRY_SEND_IP_PUBLIC=0` dan/atau `TELEMETRY_SEND_LOGS=0` di `.env` bila ingin mematikannya, lalu build ulang. `app_version` selalu ikut terkirim dan tidak bisa dimatikan. `TELEMETRY_DEBUG` tetap opt-in: build produksi tanpa flag itu tidak menulis state maupun file log lokal.
 
-> **Catatan jaringan:** bila `TELEMETRY_SEND_IP_PUBLIC` diaktifkan, agent menghubungi endpoint IP (`TELEMETRY_IP_PUBLIC_URL` bila diset, lalu `api.ipify.org` sebagai fallback) selain `register.axiooworld.com`. Kalau lookup gagal atau diblokir, field dikirim sebagai `null` dan aktivasi tetap lanjut. Pastikan host ini diizinkan di jaringan target.
+> **Catatan jaringan:** `ip_public` aktif secara default, jadi agent menghubungi endpoint IP (`TELEMETRY_IP_PUBLIC_URL` bila diset, lalu `api.ipify.org` sebagai fallback) selain `register.axiooworld.com`. Kalau lookup gagal atau diblokir, field dikirim sebagai `null` dan aktivasi tetap lanjut. Pastikan host ini diizinkan di jaringan target, atau matikan field-nya dengan `TELEMETRY_SEND_IP_PUBLIC=0`.
 
 ### QC Test Di Master User Mode
 
@@ -336,7 +334,36 @@ Run once manually (dry-run, tidak post):
 .\scripts\test.cmd
 ```
 
-Untuk benar-benar post satu kali ke API, gunakan `.\scripts\post-once.cmd` (bisa menulis state jika sukses).
+Untuk benar-benar post satu kali ke API, gunakan:
+
+```powershell
+.\scripts\post-once.cmd
+```
+
+Script ini memakai binary terpasang; berikan path eksplisit bila ingin menguji build lain (mis. `.\scripts\post-once.cmd .\target\debug\telemetry_service.exe`). Tambahkan `nopause` sebagai argumen kedua untuk menjalankannya tanpa jeda.
+
+Perlu diperhatikan: mode `--once` keluar dengan kode 0 baik saat aktivasi berhasil maupun saat server tidak terjangkau (DNS/TLS/offline), karena kegagalan yang bisa di-retry dilaporkan sebagai percobaan yang selesai. Jadi exit code 0 dari script ini **bukan** bukti aktivasi sukses — konfirmasi record barunya lewat endpoint `get_device_on`. Cara paling aman adalah menjalankannya dari jaringan ke server; script akan mengirim POST nyata.
+
+### Test post dari jaringan lokal (DNS override)
+
+Kalau DNS jaringan mengarahkan host API ke mirror lokal yang sertifikatnya kedaluwarsa (mis. `register.axiooworld.com` → IP `192.168.x.x`), aktivasi akan selalu gagal dari mesin ini. Untuk tetap bisa menguji satu POST nyata, pakai flag `--dns`:
+
+```powershell
+.\scripts\post-once.cmd --dns
+.\scripts\post-once.cmd --dns=104.26.12.124
+.\scripts\post-once.cmd .\target\debug\telemetry_service.exe nopause --dns
+```
+
+Script akan mendelegasikan ke `scripts\post-once-dns.ps1`, yang:
+
+1. meminta elevasi lewat satu prompt UAC, karena file hosts butuh admin;
+2. menanyakan alamat asli server lewat DNS publik (`1.1.1.1`, lalu `8.8.8.8`, `9.9.9.9`) bila `--dns=<ip>` tidak diberikan;
+3. memverifikasi alamat hasil override menyajikan sertifikat TLS yang valid sebelum menyentuh file hosts — kalau tidak, hosts dibiarkan utuh dan script berhenti;
+4. menolak berjalan bila host API sudah dipetakan di hosts, supaya pengaturan manual tidak ditimpa;
+5. menyimpan backup bernama `%TEMP%\telemetry_hosts_backup_<timestamp>.txt`;
+6. **selalu** menghapus kembali entri hosts di blok `finally`, termasuk saat agent gagal atau dibatalkan.
+
+Setelah selesai, DNS kembali ke pengaturan jaringan semula. Tetap konfirmasi record barunya lewat `get_device_on` seperti di atas.
 
 Check state:
 

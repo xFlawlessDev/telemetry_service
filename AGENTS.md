@@ -29,16 +29,29 @@ them in the `logs` multipart field as a JSON array. The buffer is snapshotted
 right before each POST so retries carry previous attempt logs. Debug mode also
 writes the same events to `activation.log`.
 
+Every record is self-contained for production tracing and carries
+`app_version` (from `CARGO_PKG_VERSION`), `session_id` (one random id per process
+run, so records can be grouped), and `attempt` (the activation attempt in
+flight, `0` before the first POST). `src/main.rs` calls `log_buffer.set_attempt`
+before each POST so the retry warning for a failed attempt carries that attempt's
+number.
+
 ### Payload fields
-`DeviceRegistration` posts `serial_number`, `latitude`, `longitude`, and
-`accuracy_meters` always. `ip_public` and `logs` are **opt-in build-time
-feature flags** (`TELEMETRY_SEND_IP_PUBLIC`, `TELEMETRY_SEND_LOGS` in
-`src/config.rs`), both disabled by default. When disabled the field is left out
-of the multipart form, and `ip_public` also skips its lookup entirely so no
-third-party network call happens. When enabled, `ip_public` resolves in
-`src/ip_public.rs` (endpoint from `TELEMETRY_IP_PUBLIC_URL` first, then
-`https://api.ipify.org`) and failures fall back to text `null` rather than
-aborting activation.
+`DeviceRegistration` always posts `serial_number`, `app_version`, `latitude`,
+`longitude`, and `accuracy_meters`. `app_version` comes from
+`CARGO_PKG_VERSION`, so it always matches the released build.
+
+`ip_public` and `logs` are build-time feature flags (`TELEMETRY_SEND_IP_PUBLIC`,
+`TELEMETRY_SEND_LOGS` in `src/config.rs`), both **enabled by default**. Set
+either to `0` (also `false`/`no`/`off`) to omit the field from the multipart
+form; disabling `ip_public` also skips its lookup entirely so no third-party
+network call happens. When enabled, `ip_public` resolves in `src/ip_public.rs`
+(endpoint from `TELEMETRY_IP_PUBLIC_URL` first, then `https://api.ipify.org`)
+and failures fall back to text `null` rather than aborting activation.
+
+`TELEMETRY_DEBUG` is separate and **opt-in**: unset keeps the agent fully
+stateless (no state file, no log file), which is the production default. Only
+the two payload flags default to on.
 
 
 ## Common Workflows

@@ -4,18 +4,49 @@ use crate::location::{BlockZone, GeoPoint};
 
 pub const DEFAULT_BLOCK_ZONE_POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// Build-time debug toggle. Set `TELEMETRY_DEBUG=1` in `.env` (or the process
-/// environment) to keep durable JSON activation state and write log files.
-/// When disabled, the agent writes no local files at all, which is the
-/// production default.
-pub const DEBUG: bool = option_env!("TELEMETRY_DEBUG").is_some();
+/// Agent version compiled into the binary. It is sent with every activation
+/// request and copied into every log record so production traces can always be
+/// grouped by the build that produced them.
+pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Build-time feature flag for the `ip_public` payload field. Disabled by
-/// default so current builds focus on geolocation hardening.
-pub const SEND_IP_PUBLIC: bool = option_env!("TELEMETRY_SEND_IP_PUBLIC").is_some();
+/// Build-time debug toggle. Opt-in: set `TELEMETRY_DEBUG=1` in `.env` (or the
+/// process environment) to keep durable JSON activation state and write log
+/// files. When unset the agent writes no local files at all, which is the
+/// production default; `TELEMETRY_DEBUG=0` also keeps it off.
+pub const DEBUG: bool = debug_enabled(option_env!("TELEMETRY_DEBUG"));
 
-/// Build-time feature flag for the `logs` payload field. Disabled by default.
-pub const SEND_LOGS: bool = option_env!("TELEMETRY_SEND_LOGS").is_some();
+/// Build-time feature flag for the `ip_public` payload field. Enabled by
+/// default so production traces include the public IP; set
+/// `TELEMETRY_SEND_IP_PUBLIC=0` to disable it and skip the lookup entirely.
+pub const SEND_IP_PUBLIC: bool = feature_flag_enabled(option_env!("TELEMETRY_SEND_IP_PUBLIC"));
+
+/// Build-time feature flag for the `logs` payload field. Enabled by default so
+/// production traces include the activation run; set `TELEMETRY_SEND_LOGS=0`
+/// to omit it.
+pub const SEND_LOGS: bool = feature_flag_enabled(option_env!("TELEMETRY_SEND_LOGS"));
+
+/// The optional payload fields are on unless the build explicitly disables
+/// them: unset means enabled, while `0`, `false`, `no`, and `off` (any case)
+/// turn the flag off.
+const fn feature_flag_enabled(value: Option<&str>) -> bool {
+    match value {
+        None => true,
+        Some(text) => !is_disabled(text),
+    }
+}
+
+const fn is_disabled(value: &str) -> bool {
+    matches!(
+        value.as_bytes(),
+        b"0" | b"false" | b"FALSE" | b"False" | b"no" | b"NO" | b"No" | b"off" | b"OFF" | b"Off"
+    )
+}
+
+/// Debug is opt-in: unset keeps the agent stateless, and any other value
+/// enables durable state and file logging.
+const fn debug_enabled(value: Option<&str>) -> bool {
+    value.is_some()
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct AppConfig {
@@ -140,5 +171,38 @@ mod tests {
         if option_env!("TELEMETRY_BLOCK_LATITUDE").is_none() {
             assert_eq!(AppConfig::production().block_zone, None);
         }
+    }
+
+    #[test]
+    fn feature_flag_enabled_should_default_to_on_when_unset() {
+        assert!(feature_flag_enabled(None));
+    }
+
+    #[test]
+    fn feature_flag_enabled_should_accept_enabling_values() {
+        for value in ["1", "true", "yes", "on", ""] {
+            assert!(feature_flag_enabled(Some(value)), "value: {value}");
+        }
+    }
+
+    #[test]
+    fn feature_flag_enabled_should_reject_disabling_values() {
+        for value in ["0", "false", "FALSE", "False", "no", "off", "OFF"] {
+            assert!(!feature_flag_enabled(Some(value)), "value: {value}");
+        }
+    }
+
+    #[test]
+    fn debug_enabled_should_be_opt_in() {
+        // Production builds leave the flag unset, so they must stay stateless.
+        assert!(!debug_enabled(None));
+        assert!(debug_enabled(Some("1")));
+        assert!(debug_enabled(Some("0")));
+    }
+
+    #[test]
+    fn app_version_should_match_package_version() {
+        assert_eq!(APP_VERSION, env!("CARGO_PKG_VERSION"));
+        assert!(!APP_VERSION.is_empty());
     }
 }

@@ -9,7 +9,7 @@ Windows activation background agent written in Rust.
 - Collects hardware serial number.
 - **Requires** Windows geolocation coordinates: force-enables location silently, and holds the POST until coordinates are available.
 - Optionally suppresses all POSTs while the device is inside a configured coordinate block zone.
-- Sends a structured JSON log of the activation run and the public IP (own endpoint, ipify fallback) alongside the coordinates when their feature flags are enabled.
+- Sends the build `app_version` with every request, and a structured JSON log of the activation run plus the public IP (ipify) alongside the coordinates. Both extra fields are enabled by default and can be turned off at build time.
 - Posts activation payload to `https://register.axiooworld.com/axioo_on/create`.
 - Retries retryable network/server failures with exponential backoff and jitter.
 - Removes its startup task after successful activation; the task's `--self-delete-on-success` action then removes the binary and folder.
@@ -27,7 +27,7 @@ Startup flow:
 3. Collect hardware serial number.
 4. **Force-enable Windows geolocation** (consent registry + `lfsvc` service) and wait until real coordinates are available, with timeout per attempt.
 5. If a block zone is configured and the device is inside it, sleep and re-check without posting.
-6. Build activation payload (serial, coordinates, plus `ip_public`/`logs` when their flags are enabled).
+6. Build activation payload (serial, app version, coordinates, plus `ip_public`/`logs` unless disabled).
 7. `POST` payload to `https://register.axiooworld.com/axioo_on/create`.
 8. On API success (`result = 0`), remove the startup task and exit. In debug mode, write state first.
 9. On retryable failure, sleep with backoff, then retry.
@@ -73,16 +73,17 @@ Payload fields:
 
 ```text
 serial_number={hardware serial from Win32_BIOS/Win32_BaseBoard/Win32_ComputerSystemProduct}
+app_version={agent build version, from Cargo.toml}
 latitude={Windows geolocation latitude}
 longitude={Windows geolocation longitude}
 accuracy_meters={Windows geolocation accuracy}
-ip_public={public IP, only when TELEMETRY_SEND_IP_PUBLIC is enabled}
-logs={JSON array of structured log records, only when TELEMETRY_SEND_LOGS is enabled}
+ip_public={public IP, enabled by default}
+logs={JSON array of structured log records, enabled by default}
 ```
 
-All payload fields are sent as form-data text fields. `serial_number`, `latitude`, `longitude`, and `accuracy_meters` are always present.
+All payload fields are sent as form-data text fields. `serial_number`, `app_version`, `latitude`, `longitude`, and `accuracy_meters` are always present. `app_version` comes from `CARGO_PKG_VERSION`, so it always matches the released build.
 
-`ip_public` and `logs` are **opt-in** and omitted unless their build-time flags are enabled. When `TELEMETRY_SEND_IP_PUBLIC` is on, the agent tries the `TELEMETRY_IP_PUBLIC_URL` endpoint first, then falls back to `https://api.ipify.org` (both plain-text IP); if every lookup fails or times out it is sent as text `null`. When `TELEMETRY_SEND_LOGS` is on, `logs` is a JSON array string (empty `[]` when nothing was captured).
+`ip_public` and `logs` are **on by default** and can be turned off at build time with `TELEMETRY_SEND_IP_PUBLIC=0` / `TELEMETRY_SEND_LOGS=0`. When `ip_public` is on, the agent tries the `TELEMETRY_IP_PUBLIC_URL` endpoint first, then falls back to `https://api.ipify.org` (both plain-text IP); if every lookup fails or times out it is sent as text `null`. When `logs` is on, it is a JSON array string (empty `[]` when nothing was captured). Disabling `ip_public` also skips the lookup, so no third-party network call is made at all.
 
 Location is a hard requirement. The agent force-enables Windows geolocation through the consent registry and the `lfsvc` service (needs an elevated token, see Autostart), and suppresses the POST while coordinates are unavailable. Only when a real fix is obtained is the request sent; the coordinate fields are therefore populated in normal operation.
 
@@ -113,7 +114,22 @@ It records a random `install_id`, `activated`, `activation_id`, `attempt_count`,
 
 ## Logs
 
-Production mode writes no log files. Tracing events are captured into an in-memory ring buffer (last `MAX_LOG_RECORDS`, currently 200) and shipped only when the `TELEMETRY_SEND_LOGS` feature flag is enabled, as the `logs` form field — a JSON array of `{timestamp_utc, level, target, message, fields}` records. Errors also go to stderr, which release builds discard because the binary runs without a console.
+Production mode writes no log files. Tracing events are captured into an in-memory ring buffer (last `MAX_LOG_RECORDS`, currently 200) and shipped as the `logs` form field — a JSON array of records with the shape:
+
+```json
+{
+  "timestamp_utc": "2026-10-12T04:15:02.512Z",
+  "level": "INFO",
+  "target": "telemetry_service::main",
+  "message": "activation attempt",
+  "app_version": "0.5.0",
+  "session_id": "4c1f9d2ab7e34f0c9f6b2d5a8e1c3f70",
+  "attempt": 1,
+  "fields": "install_id=..., attempt=1"
+}
+```
+
+Each record is self-contained for production tracing: `app_version` identifies the build, `session_id` groups every record from one process run, and `attempt` (0 before the first POST) ties records to a specific activation attempt. `fields` is omitted when the event carried no extra fields. Errors also go to stderr, which release builds discard because the binary runs without a console.
 
 The buffer is snapshotted immediately before each POST, so retries include the events from previous attempts. It is bounded so a long retry loop cannot grow the request body without limit.
 
@@ -137,16 +153,16 @@ TELEMETRY_USER_ID=replace-with-build-time-user-id
 TELEMETRY_API_KEY=replace-with-real-key
 TELEMETRY_TASK_NAME=TelemetryServiceActivation
 TELEMETRY_IP_PUBLIC_URL=https://ip.example.com/ip
-TELEMETRY_SEND_IP_PUBLIC=1
-TELEMETRY_SEND_LOGS=1
+TELEMETRY_SEND_IP_PUBLIC=0
+TELEMETRY_SEND_LOGS=0
 TELEMETRY_DEBUG=1
 ```
 
 `TELEMETRY_IP_PUBLIC_URL` is optional. When set, the agent tries this endpoint first for the public IP lookup and falls back to `https://api.ipify.org`. When unset or empty, only the ipify fallback is used. The endpoint must return the client IP as plain text (one line, no JSON).
 
-`TELEMETRY_SEND_IP_PUBLIC` and `TELEMETRY_SEND_LOGS` are optional **feature flags**, both **disabled by default**. When disabled, the corresponding field is omitted from the request entirely: `ip_public` performs no lookup (no third-party network call) and `logs` is not assembled. Set either to any value (for example `1`) to include it.
+`TELEMETRY_SEND_IP_PUBLIC` and `TELEMETRY_SEND_LOGS` are optional **feature flags**, both **enabled by default** so production carries the public IP and the activation log. Set either to `0` (also `false`, `no`, or `off`) to omit the field entirely: `ip_public` then performs no lookup (no third-party network call) and `logs` is not assembled.
 
-`TELEMETRY_DEBUG` is optional. Leave it unset for production; set it to any value (for example `1`) to enable durable JSON state and file logging while debugging.
+`TELEMETRY_DEBUG` is optional and **opt-in**. Leave it unset for production; set it to any value (for example `1`) to enable durable JSON state and file logging while debugging. Only the two payload flags default to enabled, so a plain release build still writes no local files.
 
 Environment variables passed to `cargo build` override values from `.env`. If a key is missing, `src/config.rs` uses safe development placeholders.
 
@@ -166,7 +182,7 @@ Coordinate availability is a hard precondition regardless of the block zone. If 
 
 Other runtime defaults live in `src/config.rs`:
 
-- `agent_version`
+- `APP_VERSION` (from `Cargo.toml`, sent as `app_version`)
 - request timeout
 - public IP lookup timeout (`api.ipify.org`)
 - retry backoff and jitter
@@ -227,9 +243,14 @@ Operators use the scripts in `scripts` instead of typing CLI commands:
 .\scripts\install.cmd telemetry_service.exe
 .\scripts\install-postclone.cmd telemetry_service.exe
 .\scripts\test.cmd
+.\scripts\post-once.cmd
 .\scripts\reset-state.cmd
 .\scripts\uninstall.cmd
 ```
+
+`test.cmd` only prints the payload (`--dry-run`, no POST). `post-once.cmd` sends one real activation attempt (`--once`); it accepts an optional explicit binary path and a `nopause` argument for unattended runs. Because `--once` exits 0 even when the server is unreachable, confirm success through the `get_device_on` API endpoint rather than the exit code.
+
+`post-once.cmd --dns` additionally points the API host at the real server for the duration of that one attempt, via a temporary hosts entry. Use it on networks whose DNS resolves the API host to a local mirror with an expired certificate. It needs elevation (one UAC prompt) and always removes the entry afterwards; pass `--dns=<ip>` to skip public DNS resolution. See `scripts/post-once-dns.ps1`.
 
 For Audit/OOBE or post-clone setup:
 
